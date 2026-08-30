@@ -1,0 +1,8 @@
+{
+  "name": "Kitch-ow!",
+  "description": "Organize and import recipes with ease. Collaborate with your household, plan weekly meals with AI-powered seasonal intelligence, and generate shopping lists.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (request.auth.token.email == "jonayers95@gmail.com" && request.auth.token.email_verified == true);
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isHouseholdMember(householdData) {
+      return isAuthenticated() && (
+        householdData.ownerId == request.auth.uid ||
+        (householdData.members != null && request.auth.uid in householdData.members)
+      );
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidRecipe(data) {
+      return hasRequiredFields(['title', 'ingredients', 'instructions', 'authorId', 'householdId']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.ingredients is list &&
+             data.instructions is list;
+    }
+
+    function isValidHousehold(data) {
+      return hasRequiredFields(['name', 'ownerId', 'members']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.members is map;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    // Test connection doc
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId) || isAdmin();
+    }
+
+    match /households/{householdId} {
+      allow read: if isAuthenticated() && (isHouseholdMember(resource.data) || isAdmin());
+      allow create: if isAuthenticated() && 
+                      (request.resource.data.ownerId == request.auth.uid || isAdmin()) &&
+                      isValidHousehold(request.resource.data);
+      allow update: if isAuthenticated() && 
+                      (isHouseholdMember(resource.data) || isAdmin()) &&
+                      isValidHousehold(request.resource.data);
+      allow delete: if (isAuthenticated() && resource.data.ownerId == request.auth.uid) || isAdmin();
+    }
+
+    match /recipes/{recipeId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidRecipe(request.resource.data);
+      allow update: if isAuthenticated() && isValidRecipe(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+
+    match /mealPlans/{mealPlanId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated();
+      allow delete: if isAuthenticated();
+    }
+  }
+}
+
