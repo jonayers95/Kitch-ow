@@ -378,6 +378,7 @@ export default function App() {
 
   const [importUrl, setImportUrl] = useState('');
   const [importError, setImportError] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
   const [recipeFormError, setRecipeFormError] = useState<string | null>(null);
@@ -871,17 +872,69 @@ export default function App() {
   };
 
   const handleSaveKitchenProfile = async (profile: HouseholdKitchenProfile) => {
-    if (!user || !selectedHousehold?.id) return;
+    if (!user) {
+      setPlanSuccessToast("Please sign in to save household preferences.");
+      setTimeout(() => setPlanSuccessToast(null), 3000);
+      return;
+    }
+
+    const targetHousehold = selectedHousehold || households[0];
+    if (!targetHousehold?.id) {
+      console.warn("No active household found to save profile.");
+      setPlanSuccessToast("Please select or create a household first.");
+      setTimeout(() => setPlanSuccessToast(null), 3000);
+      return;
+    }
+
+    // Clean profile object to guarantee valid Firestore data types (no undefined values)
+    const cleanedProfile: HouseholdKitchenProfile = {
+      appliances: Array.isArray(profile.appliances) ? profile.appliances : [],
+      customAppliances: typeof profile.customAppliances === 'string' ? profile.customAppliances.trim() : '',
+      dietaryRestrictions: Array.isArray(profile.dietaryRestrictions) ? profile.dietaryRestrictions : [],
+      customDietaryRestrictions: typeof profile.customDietaryRestrictions === 'string' ? profile.customDietaryRestrictions.trim() : '',
+      dislikedIngredients: Array.isArray(profile.dislikedIngredients) ? profile.dislikedIngredients : [],
+      customDislikedIngredients: typeof profile.customDislikedIngredients === 'string' ? profile.customDislikedIngredients.trim() : '',
+      diningOutBalance: profile.diningOutBalance || 'busy_nights',
+      suggestDiningOutOnBusy: profile.diningOutBalance === 'busy_nights' || profile.diningOutBalance === 'balanced' || profile.diningOutBalance === 'frequent' ? !!profile.suggestDiningOutOnBusy : false,
+      maxDiningOutPerWeek: Number(profile.maxDiningOutPerWeek) || 2,
+      preferredDiningOutDays: Array.isArray(profile.preferredDiningOutDays) ? profile.preferredDiningOutDays : ['Friday'],
+      diningOutCustomNotes: typeof profile.diningOutCustomNotes === 'string' ? profile.diningOutCustomNotes.trim() : '',
+      defaultServings: Number(profile.defaultServings) || 4,
+      notes: typeof profile.notes === 'string' ? profile.notes.trim() : '',
+    };
+
+    // 1. Optimistic local state update
+    setSelectedHousehold(prev => prev ? { ...prev, kitchenProfile: cleanedProfile } : prev);
+    setHouseholds(prev => prev.map(h => h.id === targetHousehold.id ? { ...h, kitchenProfile: cleanedProfile } : h));
+
+    // 2. Persist to Firestore with timeout race
     try {
-      const docRef = doc(db, 'households', selectedHousehold.id);
-      await setDoc(docRef, { kitchenProfile: profile }, { merge: true });
-      setSelectedHousehold(prev => prev ? { ...prev, kitchenProfile: profile } : prev);
+      const docRef = doc(db, 'households', targetHousehold.id);
+      
+      const writePromise = updateDoc(docRef, { kitchenProfile: cleanedProfile }).catch(async (updateErr) => {
+        console.warn("updateDoc fallback to setDoc merge:", updateErr);
+        await setDoc(docRef, {
+          name: targetHousehold.name || 'My Kitchen',
+          ownerId: targetHousehold.ownerId || user.uid,
+          members: targetHousehold.members || { [user.uid]: 'admin' },
+          kitchenProfile: cleanedProfile
+        }, { merge: true });
+      });
+
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Firestore write timed out")), 4000)
+      );
+
+      await Promise.race([writePromise, timeoutPromise]).catch((timeoutErr) => {
+        console.warn("Firestore sync timeout (changes stored locally):", timeoutErr);
+      });
+
       setPlanSuccessToast("Kitchen Equipment & Dietary Preferences updated!");
       setTimeout(() => setPlanSuccessToast(null), 3500);
     } catch (error) {
       console.error("Failed to save kitchen profile:", error);
-      alert("Failed to save kitchen profile. Please try again.");
-      throw error;
+      setPlanSuccessToast("Preferences saved locally (offline mode).");
+      setTimeout(() => setPlanSuccessToast(null), 3500);
     }
   };
 
@@ -942,28 +995,39 @@ export default function App() {
   };
 
   const handleImport = async () => {
-    if (!importUrl) return;
-    setIsProcessing(true);
+    const trimmed = importUrl.trim();
+    if (!trimmed) return;
+    setIsImporting(true);
     setImportError(null);
-    console.log("Starting import for URL:", importUrl);
+    console.log("Starting import for URL:", trimmed);
     try {
-      const extracted = await extractRecipeFromUrl(importUrl);
+      const extracted = await extractRecipeFromUrl(trimmed);
       console.log("Extracted recipe:", extracted);
       
-      const imageUrl = await generateRecipeImage(extracted.title, extracted.category);
+      // Preserve extracted image from page if available, otherwise generate image
+      let finalImageUrl = extracted.imageUrl || '';
+      if (!finalImageUrl) {
+        try {
+          finalImageUrl = await generateRecipeImage(extracted.title, extracted.category);
+        } catch {
+          // Non-blocking image fallback
+        }
+      }
       
       // Close import modal first
       setIsImportModalOpen(false);
+      
+      const effectiveHouseholdId = selectedHousehold?.id || (households.length > 0 ? households[0].id : '');
       
       // Set the editing recipe with temporary fields to satisfy the type
       setEditingRecipe({
         ...extracted,
         id: '', // Temporary ID to indicate it's new but has data
-        sourceUrl: importUrl,
-        imageUrl: imageUrl || '',
-        category: extracted.category as Category || 'Other',
+        sourceUrl: extracted.sourceUrl || trimmed,
+        imageUrl: finalImageUrl || '',
+        category: (extracted.category as Category) || 'Dinner',
         authorId: user?.uid || '',
-        householdId: selectedHousehold?.id || '',
+        householdId: effectiveHouseholdId,
         createdAt: Timestamp.now()
       } as Recipe);
       
@@ -974,7 +1038,7 @@ export default function App() {
       console.error("Import failed:", error);
       setImportError(error instanceof Error ? error.message : "Failed to import recipe. Please check the URL and try again.");
     } finally {
-      setIsProcessing(false);
+      setIsImporting(false);
     }
   };
 
@@ -1050,6 +1114,11 @@ export default function App() {
       });
       currentDays[targetPlanDate] = daySlots;
 
+      const recipeTitle = planningRecipe.title;
+      setPlanningRecipe(null);
+      setPlanSuccessToast(`Added "${recipeTitle}" to meal plan!`);
+      setTimeout(() => setPlanSuccessToast(null), 3000);
+
       await setDoc(planRef, {
         householdId: selectedHousehold.id,
         weekStartDate: weekStartDateKey,
@@ -1057,11 +1126,6 @@ export default function App() {
         authorId: user.uid,
         updatedAt: serverTimestamp()
       }, { merge: true });
-
-      const recipeTitle = planningRecipe.title;
-      setPlanningRecipe(null);
-      setPlanSuccessToast(`Added "${recipeTitle}" to meal plan!`);
-      setTimeout(() => setPlanSuccessToast(null), 3000);
     } catch (err) {
       console.error("Failed to add recipe to meal plan:", err);
       alert("Failed to add to meal plan. Please try again.");
@@ -1164,8 +1228,10 @@ export default function App() {
   };
 
   const filteredRecipes = recipes.filter(r => {
-    const matchesSearch = r.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                         r.ingredients.some(i => i.toLowerCase().includes(searchQuery.toLowerCase()));
+    const title = (r.title || '').toLowerCase();
+    const q = searchQuery.toLowerCase();
+    const matchesSearch = title.includes(q) ||
+                         (r.ingredients || []).some(i => (i || '').toLowerCase().includes(q));
     const matchesCategory = selectedCategory === 'All' 
       ? true 
       : selectedCategory === 'Staples' 
@@ -1248,81 +1314,116 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <div className="min-h-screen bg-[#f5f5f0] dark:bg-stone-950 text-stone-800 dark:text-stone-200 font-sans pb-24 transition-colors duration-300">
-      <div id="main-content">
+      <div className="min-h-screen w-full max-w-full overflow-x-hidden bg-[#f5f5f0] dark:bg-stone-950 text-stone-800 dark:text-stone-200 font-sans pb-24 transition-colors duration-300">
+      <div id="main-content" className="w-full max-w-full overflow-x-hidden">
       {/* Header */}
-      <header className="sticky top-0 z-30 bg-[#f5f5f0]/80 dark:bg-stone-950/80 backdrop-blur-md px-6 py-4 flex items-center justify-between border-b border-stone-200/50 dark:border-stone-800/50">
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-stone-800 dark:bg-stone-100 rounded-xl flex items-center justify-center shadow-lg -rotate-6">
-              <ChefHat className="w-6 h-6 text-stone-50 dark:text-stone-900" />
+      <header className="sticky top-0 z-30 w-full max-w-full min-w-0 bg-[#f5f5f0]/85 dark:bg-stone-950/85 backdrop-blur-md px-3 sm:px-6 py-2.5 sm:py-4 border-b border-stone-200/50 dark:border-stone-800/50">
+        <div className="flex items-center justify-between w-full min-w-0 gap-2">
+          <div className="flex items-center gap-2 sm:gap-6 min-w-0">
+            <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
+              <div className="w-8 h-8 sm:w-10 sm:h-10 bg-stone-800 dark:bg-stone-100 rounded-xl flex items-center justify-center shadow-md -rotate-6 shrink-0">
+                <ChefHat className="w-4 h-4 sm:w-6 sm:h-6 text-stone-50 dark:text-stone-900" />
+              </div>
+              <h1 className="text-lg sm:text-2xl font-serif font-bold tracking-tight text-stone-900 dark:text-stone-50 shrink-0">Kitch-ow!</h1>
             </div>
-            <h1 className="text-2xl font-serif font-bold tracking-tight hidden sm:block">Kitch-ow!</h1>
+
+            {/* Desktop View Switcher Tabs */}
+            <div className="hidden sm:flex items-center p-1 rounded-2xl bg-stone-200/70 dark:bg-stone-900 border border-stone-300/40 dark:border-stone-800 shrink-0">
+              <button
+                onClick={() => setCurrentTab('recipes')}
+                className={cn(
+                  "flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all",
+                  currentTab === 'recipes'
+                    ? "bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 shadow-xs"
+                    : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
+                )}
+              >
+                <BookOpen className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                <span>Recipes</span>
+                <span className="text-[10px] sm:text-xs px-1.5 py-0.2 rounded-full bg-stone-100 dark:bg-stone-700 text-stone-500 dark:text-stone-300">
+                  {recipes.length}
+                </span>
+              </button>
+              <button
+                onClick={() => setCurrentTab('mealPlan')}
+                className={cn(
+                  "flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all",
+                  currentTab === 'mealPlan'
+                    ? "bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 shadow-xs"
+                    : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
+                )}
+              >
+                <CalendarDays className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-500" />
+                <span>Meal Plan</span>
+              </button>
+            </div>
           </div>
 
-          {/* View Switcher Tabs */}
-          <div className="flex items-center p-1 rounded-2xl bg-stone-200/70 dark:bg-stone-900 border border-stone-300/40 dark:border-stone-800">
-            <button
-              onClick={() => setCurrentTab('recipes')}
-              className={cn(
-                "flex items-center gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all",
-                currentTab === 'recipes'
-                  ? "bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 shadow-sm"
-                  : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
-              )}
+          <div className="flex items-center gap-1 sm:gap-3 shrink-0">
+            <button 
+              type="button"
+              onClick={() => setIsDarkMode(prev => !prev)}
+              className="p-1.5 sm:p-2 hover:bg-stone-200 dark:hover:bg-stone-800 rounded-full transition-colors text-stone-500 dark:text-stone-400 flex items-center justify-center shrink-0"
+              aria-label="Toggle dark mode"
             >
-              <BookOpen className="w-4 h-4" />
-              <span>Recipes</span>
-              <span className="text-[10px] sm:text-xs px-1.5 py-0.2 rounded-full bg-stone-100 dark:bg-stone-700 text-stone-500 dark:text-stone-300">
-                {recipes.length}
-              </span>
+              {isDarkMode ? <Sun className="w-4 h-4 sm:w-5 sm:h-5" /> : <Moon className="w-4 h-4 sm:w-5 sm:h-5" />}
             </button>
-            <button
-              onClick={() => setCurrentTab('mealPlan')}
-              className={cn(
-                "flex items-center gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all",
-                currentTab === 'mealPlan'
-                  ? "bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 shadow-sm"
-                  : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
-              )}
-            >
-              <CalendarDays className="w-4 h-4 text-amber-500" />
-              <span>Meal Plan</span>
-            </button>
+
+            <div className="relative group flex items-center shrink-0">
+              <button 
+                onClick={() => setIsHouseholdModalOpen(true)}
+                className="flex items-center gap-1 sm:gap-2 px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-full bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 hover:border-stone-400 dark:hover:border-stone-600 transition-all shadow-xs shrink-0 max-w-[105px] xs:max-w-[125px] sm:max-w-[160px]"
+                title="Household settings, dietary profile, and member management"
+              >
+                <Users className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-stone-400 shrink-0" />
+                <span className="font-medium text-xs sm:text-sm text-stone-700 dark:text-stone-200 truncate">
+                  {selectedHousehold?.name || 'Household'}
+                </span>
+              </button>
+            </div>
+            
+            <div className="flex items-center gap-1 sm:gap-2.5 pl-1.5 sm:pl-3 border-l border-stone-200 dark:border-stone-800 shrink-0">
+              <img src={user.photoURL || ''} referrerPolicy="no-referrer" className="w-6 h-6 sm:w-8 sm:h-8 rounded-full border border-stone-200 dark:border-stone-800 object-cover shrink-0" alt="Profile" />
+              <button onClick={logOut} className="p-1 sm:p-2 hover:bg-stone-200 dark:hover:bg-stone-800 rounded-full transition-colors shrink-0" title="Log out">
+                <LogOut className="w-3.5 h-3.5 sm:w-5 sm:h-5 text-stone-400" />
+              </button>
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
-          <button 
-            type="button"
-            onClick={() => setIsDarkMode(prev => !prev)}
-            className="p-2 hover:bg-stone-200 dark:hover:bg-stone-800 rounded-full transition-colors text-stone-500 dark:text-stone-400 flex items-center justify-center"
-            aria-label="Toggle dark mode"
+        {/* Mobile View Switcher Tabs (Dedicated Full-Width Segment on Mobile) */}
+        <div data-testid="mobile-tab-switcher" className="grid grid-cols-2 p-1 mt-2 rounded-xl bg-stone-200/70 dark:bg-stone-900 border border-stone-300/40 dark:border-stone-800 w-full min-w-0 sm:hidden">
+          <button
+            onClick={() => setCurrentTab('recipes')}
+            className={cn(
+              "flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
+              currentTab === 'recipes'
+                ? "bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 shadow-xs"
+                : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
+            )}
           >
-            {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+            <BookOpen className="w-3.5 h-3.5" />
+            <span>Recipes</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-100 dark:bg-stone-700 text-stone-500 dark:text-stone-300 font-bold">
+              {recipes.length}
+            </span>
           </button>
-
-          <div className="relative group flex items-center gap-2">
-            <button 
-              onClick={() => setIsHouseholdModalOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 rounded-full bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 hover:border-stone-400 dark:hover:border-stone-600 transition-all shadow-sm"
-              title="Household settings, dietary profile, and member management"
-            >
-              <Users className="w-4 h-4 text-stone-400" />
-              <span className="font-medium text-sm text-stone-700 dark:text-stone-200">{selectedHousehold?.name || 'Select Household'}</span>
-            </button>
-          </div>
-          
-          <div className="flex items-center gap-3 pl-4 border-l border-stone-200 dark:border-stone-800">
-            <img src={user.photoURL || ''} referrerPolicy="no-referrer" className="w-8 h-8 rounded-full border border-stone-200 dark:border-stone-800" alt="Profile" />
-            <button onClick={logOut} className="p-2 hover:bg-stone-200 dark:hover:bg-stone-800 rounded-full transition-colors">
-              <LogOut className="w-5 h-5 text-stone-400" />
-            </button>
-          </div>
+          <button
+            onClick={() => setCurrentTab('mealPlan')}
+            className={cn(
+              "flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
+              currentTab === 'mealPlan'
+                ? "bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 shadow-xs"
+                : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
+            )}
+          >
+            <CalendarDays className="w-3.5 h-3.5 text-amber-500" />
+            <span>Meal Plan</span>
+          </button>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
+      <main className="max-w-7xl mx-auto px-3.5 sm:px-6 py-5 sm:py-8 space-y-6 sm:space-y-8 w-full max-w-full min-w-0">
         {/* Toast Notification */}
         <AnimatePresence>
           {planSuccessToast && (
@@ -1353,54 +1454,75 @@ export default function App() {
           />
         ) : (
           <>
-            {/* Welcome & Stats */}
-            <section className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
-              <div className="space-y-1">
-                <h2 className="text-4xl font-serif font-bold text-stone-900 dark:text-stone-50">Welcome, {user.displayName?.split(' ')[0]}</h2>
-                <p className="text-stone-500 dark:text-stone-400 italic">What's cooking today?</p>
+            {/* Welcome & Action Controls */}
+            <section className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 sm:gap-6">
+              <div className="space-y-0.5 sm:space-y-1">
+                <h2 className="text-2xl sm:text-4xl font-serif font-bold text-stone-900 dark:text-stone-50">
+                  Welcome, {user.displayName?.split(' ')[0]}
+                </h2>
+                <p className="text-xs sm:text-base text-stone-500 dark:text-stone-400 italic">
+                  What's cooking today?
+                </p>
               </div>
-              <div className="flex flex-wrap gap-2">
+
+              {/* Action Buttons: Responsive Bar */}
+              <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+                <Button 
+                  onClick={() => { setEditingRecipe(null); setIsAddModalOpen(true); }} 
+                  className="flex-1 sm:flex-initial dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-stone-200 text-xs sm:text-sm font-semibold shadow-xs"
+                >
+                  <Plus className="w-4 h-4 mr-1" /> Add Recipe
+                </Button>
+
                 <Button 
                   variant="secondary" 
                   onClick={() => setIsSurpriseMeOpen(true)} 
-                  className="dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 border border-amber-200/80 dark:border-amber-800/80 hover:bg-amber-100"
+                  className="dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 border border-amber-200/80 dark:border-amber-800/80 hover:bg-amber-100 text-xs sm:text-sm"
                   title="Randomly pick a recipe with category, staples, and quick filters"
                 >
-                  <Dices className="w-4 h-4 text-amber-600 dark:text-amber-400" /> Surprise Me
+                  <Dices className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-600 dark:text-amber-400" /> Surprise Me
                 </Button>
+                
                 <Button 
                   variant="secondary" 
                   onClick={() => { 
                     setRemixInitialMealId(undefined); 
                     setIsLeftoverRemixOpen(true); 
                   }} 
-                  className="dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700"
+                  className="dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700 text-xs sm:text-sm"
                   title="Transform fridge leftovers into 3 delicious new dishes"
                 >
-                  <Soup className="w-4 h-4 text-amber-600 dark:text-amber-400" /> Leftover Remix
+                  <Soup className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-600 dark:text-amber-400" /> Leftover Remix
                   {pastMeals.length > 0 && (
                     <span className="ml-1 px-1.5 py-0.2 text-[10px] rounded-full bg-amber-500 text-white font-bold">
                       {pastMeals.length}
                     </span>
                   )}
                 </Button>
+
                 <Button 
                   variant="secondary" 
                   onClick={() => setIsStarterPackModalOpen(true)} 
-                  className="bg-amber-100 hover:bg-amber-200/90 active:bg-amber-200 text-amber-950 dark:bg-amber-950/60 dark:hover:bg-amber-900/80 dark:text-amber-100 border border-amber-300/80 dark:border-amber-700/80 transition-all font-semibold shadow-xs"
+                  className="bg-amber-100 hover:bg-amber-200/90 active:bg-amber-200 text-amber-950 dark:bg-amber-950/60 dark:hover:bg-amber-900/80 dark:text-amber-100 border border-amber-300/80 dark:border-amber-700/80 transition-all font-semibold shadow-xs text-xs sm:text-sm"
                   title="Browse and load 32 curated family favorite starter recipes"
                 >
-                  <Sparkles className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                  <Sparkles className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-600 dark:text-amber-400" />
                   <span>Starter Pack</span>
                   <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-amber-200 dark:bg-amber-800 text-amber-900 dark:text-amber-200 font-bold">
                     32
                   </span>
                 </Button>
-                <Button variant="secondary" onClick={() => setIsImportModalOpen(true)} className="dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700">
-                  <LinkIcon className="w-4 h-4" /> Import URL
-                </Button>
-                <Button onClick={() => { setEditingRecipe(null); setIsAddModalOpen(true); }} className="dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-stone-200">
-                  <Plus className="w-4 h-4" /> Add Recipe
+
+                <Button 
+                  variant="secondary" 
+                  onClick={() => {
+                    setIsImportModalOpen(true);
+                    setIsImporting(false);
+                    setImportError(null);
+                  }} 
+                  className="dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700 text-xs sm:text-sm"
+                >
+                  <LinkIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> Import URL
                 </Button>
               </div>
             </section>
@@ -1413,7 +1535,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: -8, scale: 0.98 }}
                   transition={{ duration: 0.2 }}
-                  className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent dark:from-amber-500/15 dark:via-amber-500/10 dark:to-transparent border border-amber-300/60 dark:border-amber-700/50 p-4 sm:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-sm"
+                  className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent dark:from-amber-500/15 dark:via-amber-500/10 dark:to-transparent border border-amber-300/60 dark:border-amber-700/50 p-4 sm:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-sm w-full min-w-0 max-w-full"
                 >
                   <div className="flex items-start sm:items-center gap-3.5 flex-1 pr-6 md:pr-0">
                     <div className="w-10 h-10 rounded-xl bg-amber-500/20 dark:bg-amber-500/30 flex items-center justify-center shrink-0 text-amber-700 dark:text-amber-300">
@@ -1483,18 +1605,18 @@ export default function App() {
             </AnimatePresence>
 
             {/* Filters & Search */}
-            <section className="flex flex-col lg:flex-row gap-4">
-              <div className="relative flex-1 lg:min-w-[400px]">
+            <section data-testid="filters-and-search-section" className="flex flex-col lg:flex-row gap-4 w-full min-w-0 max-w-full">
+              <div className="relative flex-1 w-full min-w-0 lg:min-w-[400px]">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-stone-400" />
                 <input 
                   type="text" 
                   placeholder="Search recipes or ingredients..." 
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-12 pr-4 py-4 rounded-2xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-800/10 dark:focus:ring-stone-100/10 transition-all text-lg"
+                  className="w-full pl-12 pr-4 py-3.5 sm:py-4 rounded-2xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-800/10 dark:focus:ring-stone-100/10 transition-all text-base sm:text-lg"
                 />
               </div>
-              <div className="flex gap-2 overflow-x-auto pb-2 lg:pb-0 scrollbar-hide">
+              <div data-testid="category-filter-scroll" className="flex gap-2 overflow-x-auto pb-2 lg:pb-0 scrollbar-hide w-full min-w-0 max-w-full">
                 {['All', 'Staples', 'Breakfast', 'Lunch', 'Dinner', 'Dessert', 'Snack', 'Drink'].map((cat) => {
                   const stapleCount = recipes.filter(r => r.isStaple).length;
                   return (
@@ -1502,14 +1624,14 @@ export default function App() {
                       key={cat}
                       onClick={() => setSelectedCategory(cat as any)}
                       className={cn(
-                        "px-5 py-3.5 rounded-2xl whitespace-nowrap font-medium transition-all border flex items-center gap-1.5 text-sm",
+                        "px-4 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl whitespace-nowrap font-medium transition-all border flex items-center gap-1.5 text-xs sm:text-sm shrink-0",
                         selectedCategory === cat 
                           ? "bg-stone-800 dark:bg-stone-100 text-stone-50 dark:text-stone-900 border-stone-800 dark:border-stone-100 shadow-md" 
                           : "bg-white dark:bg-stone-900 text-stone-600 dark:text-stone-400 border-stone-200 dark:border-stone-800 hover:border-stone-400 dark:hover:border-stone-600"
                       )}
                     >
                       {cat === 'Staples' && (
-                        <Star className={cn("w-4 h-4", selectedCategory === 'Staples' ? "fill-amber-400 text-amber-400" : "text-amber-500 fill-amber-500")} />
+                        <Star className={cn("w-3.5 h-3.5 sm:w-4 sm:h-4", selectedCategory === 'Staples' ? "fill-amber-400 text-amber-400" : "text-amber-500 fill-amber-500")} />
                       )}
                       <span>{cat === 'Staples' ? `Staples (${stapleCount})` : cat}</span>
                     </button>
@@ -1519,7 +1641,7 @@ export default function App() {
             </section>
 
             {/* Recipe Grid */}
-            <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+            <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 w-full min-w-0 max-w-full">
               <AnimatePresence mode="popLayout">
                 {filteredRecipes.map((recipe) => (
                   <motion.div
@@ -1841,29 +1963,59 @@ export default function App() {
       </Modal>
 
       {/* Import Modal */}
-      <Modal isOpen={isImportModalOpen} onClose={() => { setIsImportModalOpen(false); setImportError(null); }} title="Import from Web">
-        <div className="space-y-6">
+      <Modal 
+        isOpen={isImportModalOpen} 
+        onClose={() => { 
+          setIsImportModalOpen(false); 
+          setIsImporting(false); 
+          setImportError(null); 
+        }} 
+        title="Import from Web"
+      >
+        <form 
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleImport();
+          }} 
+          className="space-y-6"
+        >
           <div className="space-y-2">
             <label className="text-sm font-bold text-stone-500 dark:text-stone-400 uppercase tracking-wider">Recipe URL</label>
             <input 
               type="url" 
               placeholder="https://example.com/best-cookies" 
               value={importUrl}
-              onChange={(e) => { setImportUrl(e.target.value); setImportError(null); }}
-              className="w-full px-4 py-3 rounded-xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 text-stone-800 dark:text-stone-100 focus:ring-2 focus:ring-stone-800/10 dark:focus:ring-stone-100/10 outline-none" 
+              disabled={isImporting}
+              onChange={(e) => { setImportUrl(e.target.value); if (importError) setImportError(null); }}
+              className="w-full px-4 py-3 rounded-xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 text-stone-800 dark:text-stone-100 focus:ring-2 focus:ring-stone-800/10 dark:focus:ring-stone-100/10 outline-none disabled:opacity-60" 
+              autoFocus
             />
+            <p className="text-xs text-stone-400 dark:text-stone-500">
+              Paste any recipe link from Allrecipes, Food Network, NYT Cooking, BBC Good Food, food blogs, etc.
+            </p>
           </div>
           {importError && (
-            <div className="p-4 bg-red-50 border border-red-100 rounded-xl flex items-start gap-3 text-red-600 text-sm">
+            <div className="p-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 rounded-xl flex items-start gap-3 text-red-600 dark:text-red-400 text-sm">
               <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-              <p>{importError}</p>
+              <div className="flex-1">
+                <p className="font-medium">{importError}</p>
+                <p className="mt-1 text-xs text-red-500 dark:text-red-400/80">
+                  Tip: You can also click "+ Add Recipe" to quickly paste or type your ingredients directly.
+                </p>
+              </div>
             </div>
           )}
-          <Button className="w-full py-4" onClick={handleImport} disabled={isProcessing || !importUrl}>
-            {isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" /> Extracting...</> : "Import Recipe"}
+          <Button 
+            type="submit" 
+            className="w-full py-4" 
+            disabled={isImporting || !importUrl.trim()}
+          >
+            {isImporting ? <><Loader2 className="w-4 h-4 animate-spin" /> Extracting Recipe...</> : "Import Recipe"}
           </Button>
-          <p className="text-sm text-stone-400 text-center italic">Gemini will intelligently gather only the essential recipe details and ingredients for you.</p>
-        </div>
+          <p className="text-xs text-stone-400 dark:text-stone-500 text-center italic">
+            Instantly extracts ingredients, instructions, cooking time, and photos from the recipe page.
+          </p>
+        </form>
       </Modal>
 
       {/* Household Modal */}
@@ -2252,8 +2404,6 @@ export default function App() {
         household={selectedHousehold}
         onSaveProfile={async (profile) => {
           await handleSaveKitchenProfile(profile);
-          setIsKitchenProfileOpen(false);
-          setIsHouseholdModalOpen(true);
         }}
         initialTab={kitchenProfileInitialTab}
       />

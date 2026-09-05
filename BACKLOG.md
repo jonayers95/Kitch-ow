@@ -62,13 +62,20 @@ This backlog tracks planned features, enhancements, and architectural initiative
 
 ---
 
-### 🗓️ Priority 6: Google Calendar Integration (In Progress)
-*Why Sixth*: High-value convenience feature that requires user OAuth consent for external calendar access.
-- [ ] **Dining Out Detection**: Inspect Google Calendar events for scheduled dining out/social meal events during weekly planning, auto-omitting dinners on those dates.
-- [ ] **Activity-Aware "Eat Out" Proposals**: Analyze busy calendar days and suggest dining out rather than cooking on demanding or high-activity evenings.
+### 🗓️ Priority 6: Google Calendar Integration (Completed)
+*Why Sixth*: High-value convenience feature coordinating busy schedules with meal planning rhythms.
+- [x] **Dining Out Detection**: Inspect Google Calendar events for scheduled dining out/social meal events during weekly planning, auto-omitting dinners on those dates.
+- [x] **Activity-Aware "Eat Out" Proposals & Persistent Balancing**:
+  - Auto-relief setting on packed evenings (*"Suggest dining out if the week is too busy"*).
+  - Configurable weekly balancing rhythms (Auto-Relief on Busy, Balanced 1–2 Takeout Nights, Frequent Takeout, Always Cook).
+  - Preferred dining out nights & custom favorite takeout cuisines/notes.
+  - Interactive calendar sync modal with live busy badge indicators & calendar event details.
+  - Bi-directional Google Calendar export for planned recipes.
 
 ---
 
-### 🛠️ Tech Debt & Anomalies (Low Priority)
-- [ ] **Grocery List Print Action**: Investigate print button in `SmartGroceryListModal` (browser/iframe compatibility with `window.print`).
-- [ ] **Grocery List Reset Cart Action**: Investigate "Reset Cart" button in `SmartGroceryListModal` to verify instant local storage clear and checkbox state sync.
+### 🛠️ Polish & Nice-to-Haves (Low Priority / Candidate Backlog)
+- [ ] **Printable Formats Refinement**: Ensure iframe printing falls back gracefully on mobile browsers that block `window.print()`.
+- [ ] **Pantry Inventory Tracker**: Track quantity and on-hand staples in a dedicated digital pantry view.
+- [ ] **Multi-Calendar Filtering**: Filter specific Google Calendar categories (e.g. Work vs. Personal vs. Kids Activities) when calculating busyness scores.
+- [ ] **Nutritional Macro Targets**: Household daily/weekly macronutrient summaries (protein, carb, fat estimations) for planned recipes.

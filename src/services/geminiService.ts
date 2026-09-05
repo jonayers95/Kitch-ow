@@ -1,4 +1,5 @@
 import { Recipe, MealType, HouseholdKitchenProfile } from "../types";
+import { normalizeRecipeUrl } from "../utils/recipeExtractor";
 
 export interface ExtractedRecipe {
   title: string;
@@ -6,6 +7,10 @@ export interface ExtractedRecipe {
   instructions: string[];
   category: string;
   estimatedTime?: number;
+  imageUrl?: string;
+  sourceUrl?: string;
+  yield?: string;
+  description?: string;
 }
 
 // Helper to safely perform fetch requests and handle non-JSON / HTML responses gracefully
@@ -48,11 +53,8 @@ async function safeFetchJson<T>(url: string, bodyData: any, defaultErrorMessage:
 }
 
 export async function extractRecipeFromUrl(url: string): Promise<ExtractedRecipe> {
-  if (!url.startsWith('http')) {
-    throw new Error("Please enter a valid URL starting with http:// or https://");
-  }
-
-  return safeFetchJson<ExtractedRecipe>("/api/gemini/extract-url", { url }, "Failed to extract recipe from URL.");
+  const normalized = normalizeRecipeUrl(url);
+  return safeFetchJson<ExtractedRecipe>("/api/gemini/extract-url", { url: normalized }, "Failed to extract recipe from URL.");
 }
 
 export async function generateRecipe(category: string, details: string): Promise<ExtractedRecipe> {

@@ -1,4 +1,4 @@
-import { GoogleCalendarEvent, DayCalendarInsights, WeekCalendarInsights, MealPlan, Recipe } from '../types';
+import { GoogleCalendarEvent, DayCalendarInsights, WeekCalendarInsights, MealPlan, Recipe, GoogleCalendarListItem, CalendarPlannerOptions, HouseholdKitchenProfile } from '../types';
 import { auth } from '../firebase';
 import { GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -6,6 +6,9 @@ import firebaseConfig from '../../firebase-applet-config.json';
 const TOKEN_KEY = 'kitchow_gcal_token';
 const EXPIRY_KEY = 'kitchow_gcal_token_expires_at';
 const EMAIL_KEY = 'kitchow_gcal_user_email';
+const SELECTED_CALENDARS_KEY = 'kitchow_gcal_selected_calendars';
+const EXPORT_TARGET_CALENDAR_KEY = 'kitchow_gcal_export_target_calendar';
+const PLANNER_OPTIONS_KEY = 'kitchow_calendar_planner_options';
 
 export interface CalendarAuthStatus {
   isConnected: boolean;
@@ -68,6 +71,123 @@ export function clearStoredCalendarToken(): void {
   } catch (err) {
     console.error("Error clearing calendar token:", err);
   }
+}
+
+export function saveSelectedCalendarIds(calendarIds: string[]): void {
+  try {
+    localStorage.setItem(SELECTED_CALENDARS_KEY, JSON.stringify(calendarIds));
+  } catch (err) {
+    console.error("Error saving selected calendar IDs:", err);
+  }
+}
+
+export function getStoredSelectedCalendarIds(): string[] | null {
+  try {
+    const data = localStorage.getItem(SELECTED_CALENDARS_KEY);
+    if (!data) return null;
+    return JSON.parse(data);
+  } catch (err) {
+    console.error("Error reading selected calendar IDs:", err);
+    return null;
+  }
+}
+
+export function saveExportTargetCalendarId(calendarId: string): void {
+  try {
+    localStorage.setItem(EXPORT_TARGET_CALENDAR_KEY, calendarId);
+  } catch (err) {
+    console.error("Error saving export target calendar ID:", err);
+  }
+}
+
+export function getStoredExportTargetCalendarId(): string | null {
+  try {
+    return localStorage.getItem(EXPORT_TARGET_CALENDAR_KEY);
+  } catch (err) {
+    console.error("Error reading export target calendar ID:", err);
+    return null;
+  }
+}
+
+export function saveCalendarPlannerOptions(options: CalendarPlannerOptions): void {
+  try {
+    localStorage.setItem(PLANNER_OPTIONS_KEY, JSON.stringify(options));
+  } catch (err) {
+    console.error("Error saving calendar planner options:", err);
+  }
+}
+
+export function getStoredCalendarPlannerOptions(): CalendarPlannerOptions | null {
+  try {
+    const data = localStorage.getItem(PLANNER_OPTIONS_KEY);
+    if (!data) return null;
+    return JSON.parse(data);
+  } catch (err) {
+    console.error("Error reading calendar planner options:", err);
+    return null;
+  }
+}
+
+export interface DiningOutRecommendation {
+  shouldSuggestDiningOut: boolean;
+  reason: string;
+  suggestedPlaceOrStyle?: string;
+}
+
+export function getDiningOutBalanceRecommendation(
+  profile?: HouseholdKitchenProfile | null,
+  dayInfo?: {
+    dateStr: string;
+    dayName: string;
+    isBusyEvening?: boolean;
+    hasDiningOut?: boolean;
+    busyEvents?: string[];
+  }
+): DiningOutRecommendation {
+  if (!dayInfo) {
+    return { shouldSuggestDiningOut: false, reason: '' };
+  }
+
+  // If already marked as dining out in calendar
+  if (dayInfo.hasDiningOut) {
+    return {
+      shouldSuggestDiningOut: true,
+      reason: 'Scheduled Google Calendar dining out plan',
+      suggestedPlaceOrStyle: 'Reserved Event',
+    };
+  }
+
+  const balanceMode = profile?.diningOutBalance || (profile?.suggestDiningOutOnBusy ? 'busy_nights' : 'always_cook');
+
+  // Case 1: Auto-relief on busy evenings (User setting: "Suggest dining out if the week is too busy")
+  if ((balanceMode === 'busy_nights' || balanceMode === 'balanced' || balanceMode === 'frequent' || profile?.suggestDiningOutOnBusy) && dayInfo.isBusyEvening) {
+    const eventSummary = dayInfo.busyEvents?.length ? dayInfo.busyEvents.slice(0, 2).join(', ') : 'packed evening';
+    return {
+      shouldSuggestDiningOut: true,
+      reason: `Automated relief for busy evening (${eventSummary}) — enjoy takeout or dining out instead of cooking`,
+      suggestedPlaceOrStyle: profile?.diningOutCustomNotes || 'Takeout / Local Favorite',
+    };
+  }
+
+  // Case 2: Preferred dining out days (e.g., Friday date night or weekend break)
+  if (balanceMode === 'balanced' || balanceMode === 'frequent') {
+    const preferredDays = profile?.preferredDiningOutDays && profile.preferredDiningOutDays.length > 0 
+      ? profile.preferredDiningOutDays 
+      : ['Friday'];
+
+    if (preferredDays.includes(dayInfo.dayName)) {
+      return {
+        shouldSuggestDiningOut: true,
+        reason: `Planned weekly balance: Designated dining out / takeout on ${dayInfo.dayName}`,
+        suggestedPlaceOrStyle: profile?.diningOutCustomNotes || 'Dining Out / Takeout Night',
+      };
+    }
+  }
+
+  return {
+    shouldSuggestDiningOut: false,
+    reason: '',
+  };
 }
 
 export async function requestGoogleCalendarAccess(): Promise<{ accessToken: string; email?: string }> {
@@ -163,6 +283,47 @@ export async function requestGoogleCalendarAccess(): Promise<{ accessToken: stri
   });
 }
 
+/**
+ * Fetch all accessible Google Calendars for the user (including primary, Family, Work, etc.)
+ */
+export async function fetchUserCalendars(token?: string): Promise<GoogleCalendarListItem[]> {
+  const currentToken = token || getStoredCalendarToken().accessToken;
+  if (!currentToken) {
+    throw new Error("Google Calendar is not connected.");
+  }
+
+  const response = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList', {
+    headers: {
+      Authorization: `Bearer ${currentToken}`,
+      Accept: 'application/json',
+    },
+  });
+
+  if (response.status === 401) {
+    clearStoredCalendarToken();
+    throw new Error("Google Calendar session expired. Please reconnect your Google account.");
+  }
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to fetch Google calendars list (${response.status}): ${errText}`);
+  }
+
+  const data = await response.json();
+  const items: any[] = data.items || [];
+
+  return items.map((cal) => ({
+    id: cal.id,
+    summary: cal.summaryOverride || cal.summary || 'Untitled Calendar',
+    description: cal.description || undefined,
+    primary: !!cal.primary,
+    selected: cal.selected !== undefined ? cal.selected : true,
+    backgroundColor: cal.backgroundColor || '#039be5',
+    foregroundColor: cal.foregroundColor || '#ffffff',
+    accessRole: cal.accessRole,
+  }));
+}
+
 function parseTimeStr(dateTimeStr?: string): { hour: number; minute: number; formatted: string } | null {
   if (!dateTimeStr) return null;
   try {
@@ -177,7 +338,11 @@ function parseTimeStr(dateTimeStr?: string): { hour: number; minute: number; for
   }
 }
 
-export function classifyCalendarEvent(item: any, dateKey: string): GoogleCalendarEvent {
+export function classifyCalendarEvent(
+  item: any,
+  dateKey: string,
+  calendarMeta?: { id?: string; summary?: string; backgroundColor?: string }
+): GoogleCalendarEvent {
   const summary = (item.summary || "").trim();
   const description = (item.description || "").trim();
   const location = (item.location || "").trim();
@@ -229,16 +394,56 @@ export function classifyCalendarEvent(item: any, dateKey: string): GoogleCalenda
     busyKeywords: busyMatches,
     startTimeFormatted: startParsed?.formatted || (isAllDay ? 'All Day' : undefined),
     endTimeFormatted: endParsed?.formatted,
+    calendarId: calendarMeta?.id,
+    calendarSummary: calendarMeta?.summary,
+    calendarColor: calendarMeta?.backgroundColor,
   };
 }
 
 export async function fetchWeekCalendarEvents(
   weekStartDateKey: string,
-  token?: string
+  token?: string,
+  calendarIds?: string[]
 ): Promise<WeekCalendarInsights> {
   const currentToken = token || getStoredCalendarToken().accessToken;
   if (!currentToken) {
     throw new Error("Google Calendar is not connected. Please connect your Google account.");
+  }
+
+  // Determine which calendars to fetch
+  let targetCalendars: { id: string; summary?: string; backgroundColor?: string }[] = [];
+
+  if (calendarIds && calendarIds.length > 0) {
+    targetCalendars = calendarIds.map((id) => ({ id }));
+  } else {
+    // Check saved selected calendar IDs or discover all user calendars (including Family)
+    const savedIds = getStoredSelectedCalendarIds();
+    try {
+      const allCalendars = await fetchUserCalendars(currentToken);
+      if (savedIds && savedIds.length > 0) {
+        targetCalendars = allCalendars
+          .filter((c) => savedIds.includes(c.id))
+          .map((c) => ({ id: c.id, summary: c.summary, backgroundColor: c.backgroundColor }));
+      } else {
+        // By default, query all user calendars so Family, Work, Personal are all included seamlessly
+        targetCalendars = allCalendars.map((c) => ({
+          id: c.id,
+          summary: c.summary,
+          backgroundColor: c.backgroundColor,
+        }));
+      }
+    } catch (listErr) {
+      console.warn("Could not list Google calendars, falling back to primary:", listErr);
+      if (savedIds && savedIds.length > 0) {
+        targetCalendars = savedIds.map((id) => ({ id }));
+      } else {
+        targetCalendars = [{ id: 'primary', summary: 'Primary' }];
+      }
+    }
+  }
+
+  if (targetCalendars.length === 0) {
+    targetCalendars = [{ id: 'primary', summary: 'Primary' }];
   }
 
   // Calculate Monday 00:00:00 to Sunday 23:59:59 in ISO format
@@ -249,27 +454,38 @@ export async function fetchWeekCalendarEvents(
   const timeMin = startMonday.toISOString();
   const timeMax = endSunday.toISOString();
 
-  const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime&maxResults=100`;
+  // Fetch events for all targeted calendars concurrently
+  const calendarEventFetches = targetCalendars.map(async (cal) => {
+    try {
+      const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal.id)}/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime&maxResults=100`;
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${currentToken}`,
+          Accept: 'application/json',
+        },
+      });
 
-  let response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${currentToken}`,
-      Accept: 'application/json',
-    },
+      if (response.status === 401) {
+        clearStoredCalendarToken();
+        throw new Error("Google Calendar session expired. Please reconnect your Google account.");
+      }
+
+      if (!response.ok) {
+        console.warn(`Could not fetch events for calendar ${cal.id} (${response.status})`);
+        return [];
+      }
+
+      const data = await response.json();
+      const rawItems: any[] = data.items || [];
+      return rawItems.map((item) => ({ item, calendarMeta: cal }));
+    } catch (err: any) {
+      console.warn(`Error fetching events for calendar ${cal.id}:`, err);
+      return [];
+    }
   });
 
-  if (response.status === 401) {
-    clearStoredCalendarToken();
-    throw new Error("Google Calendar session expired. Please reconnect your Google account.");
-  }
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Failed to fetch Google Calendar events (${response.status}): ${errText}`);
-  }
-
-  const data = await response.json();
-  const rawItems: any[] = data.items || [];
+  const calendarResults = await Promise.all(calendarEventFetches);
+  const allRawItemsWithMeta = calendarResults.flat();
 
   // Generate 7 days mapping
   const result: WeekCalendarInsights = {};
@@ -290,8 +506,14 @@ export async function fetchWeekCalendarEvents(
     };
   }
 
-  // Group events into appropriate days
-  rawItems.forEach((item) => {
+  // Deduplicate and group events into appropriate days
+  const seenEventIds = new Set<string>();
+
+  allRawItemsWithMeta.forEach(({ item, calendarMeta }) => {
+    const eventId = item.id || `${item.summary}_${item.start?.dateTime || item.start?.date}`;
+    if (seenEventIds.has(eventId)) return;
+    seenEventIds.add(eventId);
+
     let eventDateKey = "";
     if (item.start?.dateTime) {
       const dt = new Date(item.start.dateTime);
@@ -303,7 +525,7 @@ export async function fetchWeekCalendarEvents(
     }
 
     if (result[eventDateKey]) {
-      const classified = classifyCalendarEvent(item, eventDateKey);
+      const classified = classifyCalendarEvent(item, eventDateKey, calendarMeta);
       result[eventDateKey].allEvents.push(classified);
 
       if (classified.isDiningOut) {
@@ -323,7 +545,8 @@ export async function fetchWeekCalendarEvents(
     if (day.hasDiningOut) {
       day.suggestedAction = 'dining_out';
       const firstDining = day.diningOutEvents[0];
-      day.suggestionReason = `Scheduled Dining Out: "${firstDining.summary}"${firstDining.startTimeFormatted ? ` @ ${firstDining.startTimeFormatted}` : ''}`;
+      const sourceTag = firstDining.calendarSummary ? ` [${firstDining.calendarSummary}]` : '';
+      day.suggestionReason = `Scheduled Dining Out: "${firstDining.summary}"${sourceTag}${firstDining.startTimeFormatted ? ` @ ${firstDining.startTimeFormatted}` : ''}`;
     } else if (day.isBusyEvening || day.allEvents.length >= 3) {
       day.suggestedAction = 'quick_meal';
       const busySummary = day.busyEveningEvents.map(e => e.summary).slice(0, 2).join(", ");
@@ -340,7 +563,8 @@ export async function fetchWeekCalendarEvents(
 export async function syncMealPlanToGoogleCalendar(
   mealPlan: MealPlan,
   recipesMap: Map<string, Recipe>,
-  token?: string
+  token?: string,
+  targetCalendarId: string = 'primary'
 ): Promise<{ addedCount: number; errors: string[] }> {
   const currentToken = token || getStoredCalendarToken().accessToken;
   if (!currentToken) {
@@ -409,7 +633,7 @@ export async function syncMealPlanToGoogleCalendar(
       };
 
       try {
-        const createRes = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        const createRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${currentToken}`,
@@ -432,3 +656,4 @@ export async function syncMealPlanToGoogleCalendar(
 
   return { addedCount, errors };
 }
+

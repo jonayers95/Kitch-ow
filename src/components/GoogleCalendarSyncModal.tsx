@@ -13,7 +13,11 @@ import {
   Zap, 
   Loader2, 
   Share2,
-  CalendarCheck
+  CalendarCheck,
+  CheckSquare,
+  Square,
+  Layers,
+  ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -22,9 +26,14 @@ import {
   clearStoredCalendarToken, 
   fetchWeekCalendarEvents, 
   syncMealPlanToGoogleCalendar,
+  fetchUserCalendars,
+  saveSelectedCalendarIds,
+  getStoredSelectedCalendarIds,
+  saveExportTargetCalendarId,
+  getStoredExportTargetCalendarId,
   CalendarAuthStatus 
 } from '../services/calendarService';
-import { MealPlan, Recipe, WeekCalendarInsights } from '../types';
+import { MealPlan, Recipe, WeekCalendarInsights, GoogleCalendarListItem } from '../types';
 
 interface GoogleCalendarSyncModalProps {
   isOpen: boolean;
@@ -48,12 +57,16 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
   const [authStatus, setAuthStatus] = useState<CalendarAuthStatus>({ isConnected: false, accessToken: null });
   const [isConnecting, setIsConnecting] = useState(false);
   const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+  const [isLoadingCalendars, setIsLoadingCalendars] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [calendarsList, setCalendarsList] = useState<GoogleCalendarListItem[]>([]);
+  const [selectedCalendarIds, setSelectedCalendarIds] = useState<string[]>([]);
+  const [exportTargetCalendarId, setExportTargetCalendarId] = useState<string>('primary');
   const [calendarInsights, setCalendarInsights] = useState<WeekCalendarInsights | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [syncSuccessResult, setSyncSuccessResult] = useState<{ count: number } | null>(null);
+  const [syncSuccessResult, setSyncSuccessResult] = useState<{ count: number; calendarName?: string } | null>(null);
 
-  // Check auth on open
+  // Check auth and load calendars on open
   useEffect(() => {
     if (isOpen) {
       const status = getStoredCalendarToken();
@@ -61,17 +74,66 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
       setErrorMessage(null);
       setSyncSuccessResult(null);
 
+      const storedTarget = getStoredExportTargetCalendarId();
+      if (storedTarget) {
+        setExportTargetCalendarId(storedTarget);
+      }
+
       if (status.isConnected && status.accessToken) {
-        loadEvents(status.accessToken);
+        initializeCalendarData(status.accessToken);
       }
     }
   }, [isOpen, weekStartDateKey]);
 
-  const loadEvents = async (token?: string) => {
+  const initializeCalendarData = async (token?: string) => {
+    setIsLoadingCalendars(true);
+    try {
+      const calendars = await fetchUserCalendars(token);
+      setCalendarsList(calendars);
+
+      const storedIds = getStoredSelectedCalendarIds();
+      let activeIds: string[] = [];
+      if (storedIds && storedIds.length > 0) {
+        // Intersect with valid calendars
+        const validIds = new Set(calendars.map((c) => c.id));
+        activeIds = storedIds.filter((id) => validIds.has(id));
+        if (activeIds.length === 0) {
+          activeIds = calendars.map((c) => c.id);
+        }
+      } else {
+        // By default select all accessible user calendars (Primary, Family, Work, etc.)
+        activeIds = calendars.map((c) => c.id);
+      }
+
+      setSelectedCalendarIds(activeIds);
+      saveSelectedCalendarIds(activeIds);
+
+      // Verify target export calendar
+      const targetExists = calendars.some((c) => c.id === exportTargetCalendarId);
+      if (!targetExists) {
+        const primaryCal = calendars.find((c) => c.primary) || calendars[0];
+        if (primaryCal) {
+          setExportTargetCalendarId(primaryCal.id);
+          saveExportTargetCalendarId(primaryCal.id);
+        }
+      }
+
+      await loadEvents(token, activeIds);
+    } catch (err: any) {
+      console.warn("Error fetching user calendars:", err);
+      // Fallback to loading primary
+      await loadEvents(token);
+    } finally {
+      setIsLoadingCalendars(false);
+    }
+  };
+
+  const loadEvents = async (token?: string, calendarIdsToQuery?: string[]) => {
     setIsLoadingEvents(true);
     setErrorMessage(null);
     try {
-      const insights = await fetchWeekCalendarEvents(weekStartDateKey, token);
+      const ids = calendarIdsToQuery || selectedCalendarIds;
+      const insights = await fetchWeekCalendarEvents(weekStartDateKey, token, ids);
       setCalendarInsights(insights);
       if (onCalendarUpdated) onCalendarUpdated();
     } catch (err: any) {
@@ -82,13 +144,42 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
     }
   };
 
+  const handleToggleCalendar = async (calendarId: string) => {
+    let newSelected: string[];
+    if (selectedCalendarIds.includes(calendarId)) {
+      if (selectedCalendarIds.length === 1) {
+        // Keep at least one selected
+        return;
+      }
+      newSelected = selectedCalendarIds.filter((id) => id !== calendarId);
+    } else {
+      newSelected = [...selectedCalendarIds, calendarId];
+    }
+
+    setSelectedCalendarIds(newSelected);
+    saveSelectedCalendarIds(newSelected);
+    await loadEvents(undefined, newSelected);
+  };
+
+  const handleSelectAllCalendars = async () => {
+    const allIds = calendarsList.map((c) => c.id);
+    setSelectedCalendarIds(allIds);
+    saveSelectedCalendarIds(allIds);
+    await loadEvents(undefined, allIds);
+  };
+
+  const handleTargetCalendarChange = (newTargetId: string) => {
+    setExportTargetCalendarId(newTargetId);
+    saveExportTargetCalendarId(newTargetId);
+  };
+
   const handleConnect = async () => {
     setIsConnecting(true);
     setErrorMessage(null);
     try {
       const { accessToken, email } = await requestGoogleCalendarAccess();
       setAuthStatus({ isConnected: true, accessToken, userEmail: email });
-      await loadEvents(accessToken);
+      await initializeCalendarData(accessToken);
       if (onCalendarUpdated) onCalendarUpdated();
     } catch (err: any) {
       console.error("Google Calendar connection error:", err);
@@ -101,6 +192,8 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
   const handleDisconnect = () => {
     clearStoredCalendarToken();
     setAuthStatus({ isConnected: false, accessToken: null });
+    setCalendarsList([]);
+    setSelectedCalendarIds([]);
     setCalendarInsights(null);
     setSyncSuccessResult(null);
     if (onCalendarUpdated) onCalendarUpdated();
@@ -118,9 +211,12 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
         if (r.id) recipeMap.set(r.id, r);
       });
 
-      const result = await syncMealPlanToGoogleCalendar(mealPlan, recipeMap);
+      const targetCalendarObj = calendarsList.find((c) => c.id === exportTargetCalendarId);
+      const targetName = targetCalendarObj ? targetCalendarObj.summary : 'Google Calendar';
+
+      const result = await syncMealPlanToGoogleCalendar(mealPlan, recipeMap, undefined, exportTargetCalendarId);
       if (result.addedCount > 0) {
-        setSyncSuccessResult({ count: result.addedCount });
+        setSyncSuccessResult({ count: result.addedCount, calendarName: targetName });
       } else if (result.errors.length > 0) {
         setErrorMessage(`Could not export some events: ${result.errors[0]}`);
       } else {
@@ -164,7 +260,7 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
                   Google Calendar Integration
                 </h3>
                 <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
-                  Detect dining out, avoid dinner conflicts, and sync your weekly plan
+                  Scan personal & family calendars, detect dining out, and sync your weekly plan
                 </p>
               </div>
             </div>
@@ -193,7 +289,7 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
                 <div>
                   <p className="font-bold">Successfully Exported!</p>
                   <p className="mt-0.5">
-                    Synced {syncSuccessResult.count} meals to your Google Calendar. You'll now see your recipes and cook times directly in your daily agenda.
+                    Synced {syncSuccessResult.count} meals to your <strong>{syncSuccessResult.calendarName || 'Google Calendar'}</strong>. You'll now see your recipes and cook times directly in your daily agenda.
                   </p>
                 </div>
               </div>
@@ -211,7 +307,7 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
                     <p className="text-xs text-stone-500 dark:text-stone-400">
                       {authStatus.isConnected && authStatus.userEmail
                         ? `Linked as ${authStatus.userEmail}`
-                        : 'Allow Kitch-ow! to read upcoming events & detect meal conflicts'}
+                        : 'Allow Kitch-ow! to read upcoming events & detect meal conflicts across all your calendars'}
                     </p>
                   </div>
                 </div>
@@ -221,10 +317,10 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => loadEvents()}
-                        disabled={isLoadingEvents}
+                        disabled={isLoadingEvents || isLoadingCalendars}
                         className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 hover:bg-stone-100 dark:hover:bg-stone-600 text-stone-700 dark:text-stone-200 transition-colors flex items-center gap-1.5"
                       >
-                        <RefreshCw className={`w-3.5 h-3.5 ${isLoadingEvents ? 'animate-spin' : ''}`} />
+                        <RefreshCw className={`w-3.5 h-3.5 ${isLoadingEvents || isLoadingCalendars ? 'animate-spin' : ''}`} />
                         Refresh
                       </button>
                       <button
@@ -257,27 +353,79 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
                 </div>
               </div>
 
+              {/* Multi-Calendar Selection (Family, Personal, Work, etc.) */}
+              {authStatus.isConnected && calendarsList.length > 0 && (
+                <div className="pt-3 border-t border-stone-200/70 dark:border-stone-700/70 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-stone-700 dark:text-stone-300 flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-indigo-500" />
+                      Active Calendars to Scan ({selectedCalendarIds.length} of {calendarsList.length} enabled)
+                    </span>
+                    {selectedCalendarIds.length < calendarsList.length && (
+                      <button
+                        onClick={handleSelectAllCalendars}
+                        className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+                      >
+                        Enable All
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    {calendarsList.map((cal) => {
+                      const isSelected = selectedCalendarIds.includes(cal.id);
+                      return (
+                        <button
+                          key={cal.id}
+                          type="button"
+                          onClick={() => handleToggleCalendar(cal.id)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-medium border flex items-center gap-2 transition-all ${
+                            isSelected
+                              ? 'bg-white dark:bg-stone-700 text-stone-900 dark:text-stone-100 border-stone-300 dark:border-stone-600 shadow-sm'
+                              : 'bg-stone-100/80 dark:bg-stone-800/40 text-stone-400 dark:text-stone-500 border-stone-200 dark:border-stone-800 opacity-60'
+                          }`}
+                        >
+                          <span 
+                            className="w-2.5 h-2.5 rounded-full flex-shrink-0" 
+                            style={{ backgroundColor: cal.backgroundColor || '#3b82f6' }}
+                          />
+                          <span className="truncate max-w-[160px]">
+                            {cal.summary}
+                            {cal.primary && ' (Primary)'}
+                          </span>
+                          {isSelected ? (
+                            <CheckSquare className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 flex-shrink-0" />
+                          ) : (
+                            <Square className="w-3.5 h-3.5 text-stone-400 flex-shrink-0" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Feature capabilities list */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-stone-200/60 dark:border-stone-700/60 text-xs text-stone-600 dark:text-stone-300">
                 <div className="flex items-start gap-2">
                   <span className="text-base">🍷</span>
                   <div>
                     <strong className="block text-stone-800 dark:text-stone-200">Dining Out Radar</strong>
-                    <span className="text-[11px] text-stone-500">Auto-detects restaurant dates & omit dinners</span>
+                    <span className="text-[11px] text-stone-500">Auto-detects restaurant dates across family & personal calendars</span>
                   </div>
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="text-base">⚡</span>
                   <div>
                     <strong className="block text-stone-800 dark:text-stone-200">Busy Evenings</strong>
-                    <span className="text-[11px] text-stone-500">Prioritizes 15-20m quick meals on packed nights</span>
+                    <span className="text-[11px] text-stone-500">Flags soccer games & late meetings for quick 15-20m meals</span>
                   </div>
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="text-base">📅</span>
                   <div>
-                    <strong className="block text-stone-800 dark:text-stone-200">2-Way Sync</strong>
-                    <span className="text-[11px] text-stone-500">Push dinner plans & cook times to Google Calendar</span>
+                    <strong className="block text-stone-800 dark:text-stone-200">Export to Any Calendar</strong>
+                    <span className="text-[11px] text-stone-500">Sync dinner plans straight into your Family calendar</span>
                   </div>
                 </div>
               </div>
@@ -293,7 +441,7 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
                   </h4>
                   {isLoadingEvents && (
                     <span className="text-[11px] text-blue-600 flex items-center gap-1">
-                      <Loader2 className="w-3 h-3 animate-spin" /> Scanning calendar...
+                      <Loader2 className="w-3 h-3 animate-spin" /> Scanning calendars...
                     </span>
                   )}
                 </div>
@@ -324,22 +472,54 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
 
                           <div className="flex-1 min-w-0">
                             {day.hasDiningOut ? (
-                              <div className="flex items-center gap-2 text-xs text-amber-900 dark:text-amber-200 font-semibold">
-                                <span className="text-base">🍷</span>
-                                <span className="truncate">
-                                  Dining Out: {day.diningOutEvents.map(e => e.summary).join(', ')}
-                                </span>
+                              <div className="space-y-1">
+                                {day.diningOutEvents.map((evt) => (
+                                  <div key={evt.id} className="flex items-center gap-2 text-xs text-amber-900 dark:text-amber-200 font-semibold">
+                                    <span className="text-base">🍷</span>
+                                    <span className="truncate">
+                                      Dining Out: {evt.summary}
+                                    </span>
+                                    {evt.calendarSummary && (
+                                      <span 
+                                        className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/50 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
+                                      >
+                                        {evt.calendarSummary}
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
                               </div>
                             ) : day.isBusyEvening ? (
-                              <div className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200 font-semibold">
-                                <span className="text-base">⚡</span>
-                                <span className="truncate">
-                                  Busy Evening: {day.busyEveningEvents.map(e => e.summary).join(', ')}
-                                </span>
+                              <div className="space-y-1">
+                                {day.busyEveningEvents.map((evt) => (
+                                  <div key={evt.id} className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200 font-semibold">
+                                    <span className="text-base">⚡</span>
+                                    <span className="truncate">
+                                      Busy Evening: {evt.summary}
+                                    </span>
+                                    {evt.calendarSummary && (
+                                      <span 
+                                        className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/50 text-indigo-800 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800"
+                                      >
+                                        {evt.calendarSummary}
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
                               </div>
                             ) : hasEvents ? (
-                              <div className="text-xs text-stone-600 dark:text-stone-400">
-                                {day.allEvents.length} event{day.allEvents.length === 1 ? '' : 's'} scheduled (open for normal cooking)
+                              <div className="text-xs text-stone-600 dark:text-stone-400 flex flex-wrap items-center gap-1.5">
+                                <span>{day.allEvents.length} event{day.allEvents.length === 1 ? '' : 's'} scheduled (open for normal cooking)</span>
+                                <div className="flex items-center gap-1">
+                                  {Array.from(new Set(day.allEvents.map((e) => e.calendarSummary).filter(Boolean))).map((calName) => (
+                                    <span 
+                                      key={calName} 
+                                      className="text-[10px] px-1.5 py-0.5 rounded bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300 border border-stone-200 dark:border-stone-700"
+                                    >
+                                      {calName}
+                                    </span>
+                                  ))}
+                                </div>
                               </div>
                             ) : (
                               <div className="text-xs text-stone-400 italic">
@@ -371,7 +551,7 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
             )}
 
             {/* Sync Meal Plan to Google Calendar */}
-            <div className="p-5 rounded-2xl bg-gradient-to-r from-blue-500/10 via-indigo-500/5 to-transparent border border-blue-200 dark:border-blue-800/60 space-y-3">
+            <div className="p-5 rounded-2xl bg-gradient-to-r from-blue-500/10 via-indigo-500/5 to-transparent border border-blue-200 dark:border-blue-800/60 space-y-4">
               <div className="flex items-center gap-2">
                 <Share2 className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                 <h4 className="font-serif font-bold text-sm text-stone-900 dark:text-stone-100">
@@ -379,8 +559,31 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
                 </h4>
               </div>
               <p className="text-xs text-stone-600 dark:text-stone-300">
-                Push all {totalPlannedMeals} scheduled recipes, cook times, and meal notes for the week of <strong>{weekRangeLabel}</strong> to your primary Google Calendar.
+                Push all {totalPlannedMeals} scheduled recipes, cook times, and meal notes for the week of <strong>{weekRangeLabel}</strong> to your chosen Google Calendar.
               </p>
+
+              {/* Destination Calendar Picker */}
+              {authStatus.isConnected && calendarsList.length > 0 && (
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
+                  <label className="text-xs font-semibold text-stone-700 dark:text-stone-300">
+                    Export Destination Calendar:
+                  </label>
+                  <div className="relative inline-block">
+                    <select
+                      value={exportTargetCalendarId}
+                      onChange={(e) => handleTargetCalendarChange(e.target.value)}
+                      className="px-3 py-1.5 pr-8 rounded-xl text-xs font-medium bg-white dark:bg-stone-800 border border-stone-300 dark:border-stone-600 text-stone-800 dark:text-stone-100 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none cursor-pointer"
+                    >
+                      {calendarsList.map((cal) => (
+                        <option key={cal.id} value={cal.id}>
+                          {cal.summary} {cal.primary ? '(Primary)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown className="w-3.5 h-3.5 text-stone-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  </div>
+                </div>
+              )}
 
               <button
                 onClick={handleExportToGoogleCalendar}
@@ -416,3 +619,4 @@ export const GoogleCalendarSyncModal: React.FC<GoogleCalendarSyncModalProps> = (
     </AnimatePresence>
   );
 };
+

@@ -79,8 +79,39 @@ const BAKERY_KEYWORDS = [
 export function categorizeIngredient(ingredientText: string): { tier: 'primary' | 'pantry'; category: GroceryCategory } {
   const lower = ingredientText.toLowerCase().trim();
 
-  // Check if it's a known pantry staple
+  // 1. Check Bakery & Bread (e.g. corn tortillas, burger buns)
+  if (BAKERY_KEYWORDS.some(k => new RegExp(`\\b${k}\\b`, 'i').test(lower))) {
+    return { tier: 'primary', category: 'Bakery & Bread' };
+  }
+
+  // 2. Check Meat & Seafood
+  if (MEAT_KEYWORDS.some(k => new RegExp(`\\b${k}\\b`, 'i').test(lower))) {
+    return { tier: 'primary', category: 'Meat & Seafood' };
+  }
+
+  // 3. Check Dairy & Refrigerated
+  if (DAIRY_KEYWORDS.some(k => new RegExp(`\\b${k}\\b`, 'i').test(lower))) {
+    return { tier: 'primary', category: 'Dairy & Refrigerated' };
+  }
+
+  // 4. Check if it is explicitly a fresh produce item (like fresh garlic, onion, bell pepper) before generic spice matching
+  const isFreshProduce = PRODUCE_KEYWORDS.some(k => new RegExp(`\\b${k}\\b`, 'i').test(lower)) &&
+    !lower.includes('powder') && !lower.includes('dried') && !lower.includes('ground') && !lower.includes('flake');
+
+  if (isFreshProduce) {
+    return { tier: 'primary', category: 'Produce & Herbs' };
+  }
+
+  // 5. Check if it's a known pantry staple
   const isPantry = PANTRY_KEYWORDS.some(k => {
+    // If checking 'cloves', make sure it's not 'cloves of garlic' or 'garlic cloves'
+    if (k === 'cloves' || k === 'clove') {
+      if (lower.includes('garlic')) return false;
+    }
+    // If checking 'pepper', make sure it's not bell pepper unless black pepper or cayenne
+    if (k === 'pepper' && (lower.includes('bell pepper') || lower.includes('sweet pepper') || lower.includes('chili pepper') || lower.includes('jalapeno'))) {
+      return false;
+    }
     const regex = new RegExp(`\\b${k}\\b`, 'i');
     return regex.test(lower);
   });
@@ -95,25 +126,14 @@ export function categorizeIngredient(ingredientText: string): { tier: 'primary' 
     return { tier: 'pantry', category: 'Spices & Seasonings' };
   }
 
-  // Primary categories
-  if (MEAT_KEYWORDS.some(k => new RegExp(`\\b${k}\\b`, 'i').test(lower))) {
-    return { tier: 'primary', category: 'Meat & Seafood' };
-  }
-
-  if (DAIRY_KEYWORDS.some(k => new RegExp(`\\b${k}\\b`, 'i').test(lower))) {
-    return { tier: 'primary', category: 'Dairy & Refrigerated' };
-  }
-
-  if (BAKERY_KEYWORDS.some(k => new RegExp(`\\b${k}\\b`, 'i').test(lower))) {
-    return { tier: 'primary', category: 'Bakery & Bread' };
-  }
-
-  if (PRODUCE_KEYWORDS.some(k => new RegExp(`\\b${k}\\b`, 'i').test(lower))) {
-    return { tier: 'primary', category: 'Produce & Herbs' };
-  }
-
+  // 6. Check Canned Goods / Pasta / Grains
   if (lower.includes('pasta') || lower.includes('rice') || lower.includes('noodle') || lower.includes('quinoa') || lower.includes('couscous') || lower.includes('beans') || lower.includes('lentil') || lower.includes('can of') || lower.includes('canned')) {
     return { tier: 'primary', category: 'Pantry & Canned Goods' };
+  }
+
+  // 7. General Produce fallback
+  if (PRODUCE_KEYWORDS.some(k => new RegExp(`\\b${k}\\b`, 'i').test(lower))) {
+    return { tier: 'primary', category: 'Produce & Herbs' };
   }
 
   return { tier: 'primary', category: 'Produce & Herbs' };

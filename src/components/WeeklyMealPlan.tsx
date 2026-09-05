@@ -178,6 +178,7 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
 
   // Modal states
   const [isAddMealModalOpen, setIsAddMealModalOpen] = useState(false);
+  const [isAddingMeal, setIsAddingMeal] = useState(false);
   const [isAiPlannerOpen, setIsAiPlannerOpen] = useState(false);
   const [selectedDateForMeal, setSelectedDateForMeal] = useState<string>('');
   const [selectedMealType, setSelectedMealType] = useState<MealType>('Dinner');
@@ -221,6 +222,10 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     slot: MealSlot;
     recipe?: Recipe;
   } | null>(null);
+
+  // Mobile View Mode & Active Day State
+  const [mobileViewMode, setMobileViewMode] = useState<'single' | 'all'>('single');
+  const [mobileActiveDateKey, setMobileActiveDateKey] = useState<string>(() => formatDateKey(new Date()));
 
   const weekStartDateKey = useMemo(() => formatDateKey(currentMonday), [currentMonday]);
 
@@ -448,12 +453,17 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     setCustomDiningPlace('');
     setCustomDiningNotes('');
     setActiveTab('recipe');
+    setSelectedRecipeId('');
+    setCustomTitle('');
+    setCustomNotes('');
+    setCustomDiningPlace('');
+    setCustomDiningNotes('');
     setRecipeSearchQuery('');
     setIsAddMealModalOpen(true);
   };
 
   const handleAddMealSubmit = async () => {
-    if (!selectedDateForMeal) return;
+    if (!selectedDateForMeal || isAddingMeal) return;
 
     let slot: MealSlot;
     if (activeTab === 'recipe') {
@@ -491,11 +501,22 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     daySlots.push(slot);
     currentDays[selectedDateForMeal] = daySlots;
 
+    setIsAddingMeal(true);
     try {
       await saveMealPlanUpdate(currentDays);
+      // Close the modal once the meal has been added
       setIsAddMealModalOpen(false);
+      setSelectedRecipeId('');
+      setCustomTitle('');
+      setCustomNotes('');
+      setCustomDiningPlace('');
+      setCustomDiningNotes('');
     } catch (err) {
       console.error("Error adding meal:", err);
+      // Ensure modal is closed if optimistic update occurred
+      setIsAddMealModalOpen(false);
+    } finally {
+      setIsAddingMeal(false);
     }
   };
 
@@ -952,32 +973,60 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
   return (
     <div className="space-y-6">
       {/* Week Header Bar */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white dark:bg-stone-900 p-5 sm:p-6 rounded-3xl border border-stone-200 dark:border-stone-800 shadow-sm">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-2xl bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-            <Calendar className="w-6 h-6" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-2xl font-serif font-bold text-stone-900 dark:text-stone-50">
-                Weekly Meal Plan
-              </h2>
-              {totalMealsPlanned > 0 && (
-                <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300">
-                  {completedMealsCount}/{totalMealsPlanned} Cooked
-                </span>
-              )}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white dark:bg-stone-900 p-4 sm:p-6 rounded-3xl border border-stone-200 dark:border-stone-800 shadow-sm">
+        <div className="flex items-center gap-3 sm:gap-4 w-full md:w-auto justify-between md:justify-start">
+          <div className="flex items-center gap-3 sm:gap-4">
+            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+              <Calendar className="w-5 h-5 sm:w-6 sm:h-6" />
             </div>
-            <p className="text-sm text-stone-500 dark:text-stone-400">
-              {weekRangeLabel}
-            </p>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-xl sm:text-2xl font-serif font-bold text-stone-900 dark:text-stone-50">
+                  Weekly Meal Plan
+                </h2>
+                {totalMealsPlanned > 0 && (
+                  <span className="text-[11px] sm:text-xs font-semibold px-2 py-0.5 rounded-full bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300">
+                    {completedMealsCount}/{totalMealsPlanned} Cooked
+                  </span>
+                )}
+              </div>
+              <p className="text-xs sm:text-sm text-stone-500 dark:text-stone-400">
+                {weekRangeLabel}
+              </p>
+            </div>
+          </div>
+
+          {/* Mobile week navigation */}
+          <div className="flex md:hidden items-center bg-stone-100 dark:bg-stone-800 rounded-full p-0.5 border border-stone-200 dark:border-stone-700 shrink-0">
+            <button
+              onClick={handlePrevWeek}
+              className="p-1.5 hover:bg-white dark:hover:bg-stone-700 rounded-full text-stone-600 dark:text-stone-300 transition-colors"
+              title="Previous Week"
+              aria-label="Previous Week"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleThisWeek}
+              className="px-2 py-0.5 text-[11px] font-semibold text-stone-700 dark:text-stone-200"
+            >
+              Today
+            </button>
+            <button
+              onClick={handleNextWeek}
+              className="p-1.5 hover:bg-white dark:hover:bg-stone-700 rounded-full text-stone-600 dark:text-stone-300 transition-colors"
+              title="Next Week"
+              aria-label="Next Week"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
           </div>
         </div>
 
         {/* Controls */}
         <div className="flex items-center flex-wrap gap-2 w-full md:w-auto">
-          {/* Week Navigation */}
-          <div className="flex items-center bg-stone-100 dark:bg-stone-800 rounded-full p-1 border border-stone-200 dark:border-stone-700">
+          {/* Desktop Week Navigation */}
+          <div className="hidden md:flex items-center bg-stone-100 dark:bg-stone-800 rounded-full p-1 border border-stone-200 dark:border-stone-700">
             <button
               onClick={handlePrevWeek}
               className="p-2 hover:bg-white dark:hover:bg-stone-700 rounded-full text-stone-600 dark:text-stone-300 transition-colors"
@@ -1002,32 +1051,47 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
             </button>
           </div>
 
+          {/* AI Auto-Plan Week Button */}
+          <button
+            onClick={() => setIsAiPlannerOpen(true)}
+            className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 sm:gap-2 px-3.5 sm:px-4 py-2 rounded-full bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white text-xs sm:text-sm font-semibold transition-all shadow-sm shadow-amber-500/20 active:scale-95"
+            title="Use Gemini AI to populate your weekly plan based on seasonal produce and trends"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>AI Plan</span>
+          </button>
+
+          {/* Grocery List Button */}
+          <button
+            onClick={() => setIsGroceryModalOpen(true)}
+            className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 sm:gap-2 px-3.5 sm:px-4 py-2 rounded-full bg-stone-800 hover:bg-stone-700 dark:bg-stone-100 dark:hover:bg-stone-200 text-white dark:text-stone-900 text-xs sm:text-sm font-medium transition-all shadow-sm"
+          >
+            <ShoppingCart className="w-4 h-4" />
+            <span>Grocery</span>
+            {weeklyGroceries.length > 0 && (
+              <span className="bg-amber-600 text-white dark:bg-amber-700 text-[10px] sm:text-xs px-1.5 py-0.2 rounded-full font-bold">
+                {weeklyGroceries.length}
+              </span>
+            )}
+          </button>
+
           {/* Google Calendar Sync & Insights Button */}
           <button
             onClick={() => setIsGoogleCalendarModalOpen(true)}
             className={cn(
-              "flex items-center gap-2 px-3.5 py-2 rounded-full text-sm font-semibold transition-all shadow-xs active:scale-95 border",
+              "flex items-center gap-1.5 px-3 py-2 rounded-full text-xs sm:text-sm font-semibold transition-all shadow-xs active:scale-95 border",
               calendarAuthStatus.isConnected
                 ? "bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/50 dark:hover:bg-blue-900/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800"
                 : "bg-stone-100 hover:bg-stone-200 dark:bg-stone-800 dark:hover:bg-stone-700 text-stone-700 dark:text-stone-300 border-stone-200 dark:border-stone-700"
             )}
             title="Connect Google Calendar to sync meal plans and auto-detect dining out schedules"
           >
-            <CalendarCheck className={cn("w-4 h-4", calendarAuthStatus.isConnected ? "text-blue-600 dark:text-blue-400" : "text-stone-500")} />
-            <span>Calendar Sync</span>
+            <CalendarCheck className={cn("w-3.5 h-3.5 sm:w-4 sm:h-4", calendarAuthStatus.isConnected ? "text-blue-600 dark:text-blue-400" : "text-stone-500")} />
+            <span className="hidden sm:inline">Calendar Sync</span>
+            <span className="sm:hidden">Calendar</span>
             {calendarAuthStatus.isConnected && (
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" title="Google Calendar Active" />
             )}
-          </button>
-
-          {/* AI Auto-Plan Week Button */}
-          <button
-            onClick={() => setIsAiPlannerOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white text-sm font-semibold transition-all shadow-sm shadow-amber-500/20 active:scale-95"
-            title="Use Gemini AI to populate your weekly plan based on seasonal produce and trends"
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>AI Plan Week</span>
           </button>
 
           {/* Leftover Remix & Freshness Tracker Button */}
@@ -1036,28 +1100,14 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
               setRemixInitialMealId(undefined);
               setIsLeftoverRemixOpen(true);
             }}
-            className="flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 text-white text-sm font-semibold transition-all shadow-sm active:scale-95"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-full bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700 text-stone-700 dark:text-stone-200 text-xs sm:text-sm font-semibold transition-all shadow-xs active:scale-95 border border-stone-200 dark:border-stone-700"
             title="Transform fridge leftovers into 3 delicious new meal creations"
           >
-            <Soup className="w-4 h-4" />
-            <span>Leftover Remix</span>
+            <Soup className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-600 dark:text-amber-400" />
+            <span>Remix</span>
             {pastMeals.length > 0 && (
-              <span className="bg-white/20 text-white text-xs px-1.5 py-0.5 rounded-full font-bold">
+              <span className="bg-amber-500 text-white text-[10px] sm:text-xs px-1.5 py-0.2 rounded-full font-bold">
                 {pastMeals.length}
-              </span>
-            )}
-          </button>
-
-          {/* Grocery List Button */}
-          <button
-            onClick={() => setIsGroceryModalOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 rounded-full bg-stone-800 hover:bg-stone-700 dark:bg-stone-100 dark:hover:bg-stone-200 text-white dark:text-stone-900 text-sm font-medium transition-all shadow-sm"
-          >
-            <ShoppingCart className="w-4 h-4" />
-            <span>Grocery List</span>
-            {weeklyGroceries.length > 0 && (
-              <span className="bg-amber-700/60 text-white text-xs px-1.5 py-0.5 rounded-full font-bold">
-                {weeklyGroceries.length}
               </span>
             )}
           </button>
@@ -1070,22 +1120,91 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                 setIsBumpModalOpen(true);
               }}
               className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-full text-sm font-semibold transition-all shadow-xs active:scale-95",
+                "flex items-center gap-1.5 px-3 py-2 rounded-full text-xs sm:text-sm font-semibold transition-all shadow-xs active:scale-95",
                 missedMeals.length > 0
                   ? "bg-amber-500 text-white hover:bg-amber-600 shadow-amber-500/20 animate-pulse font-bold"
                   : "bg-stone-100 hover:bg-stone-200 dark:bg-stone-800 dark:hover:bg-stone-700 text-stone-700 dark:text-stone-300 border border-stone-200 dark:border-stone-700"
               )}
               title="Reschedule planned or missed meals to upcoming open slots"
             >
-              <CalendarClock className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-              <span>{missedMeals.length > 0 ? 'Reschedule Missed' : 'Reschedule / Bump'}</span>
+              <CalendarClock className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-600 dark:text-amber-400" />
+              <span>{missedMeals.length > 0 ? 'Reschedule' : 'Bump'}</span>
               {missedMeals.length > 0 && (
-                <span className="bg-white text-amber-700 text-xs px-1.5 py-0.5 rounded-full font-bold">
+                <span className="bg-white text-amber-700 text-[10px] sm:text-xs px-1.5 py-0.2 rounded-full font-bold">
                   {missedMeals.length}
                 </span>
               )}
             </button>
           )}
+        </div>
+      </div>
+
+      {/* Mobile Day Selector Bar (Clutter-Free Day Switcher Strip) */}
+      <div 
+        data-testid="mobile-day-selector"
+        className="lg:hidden bg-white dark:bg-stone-900 p-2.5 rounded-2xl border border-stone-200 dark:border-stone-800 shadow-xs"
+      >
+        <div className="flex items-center justify-between gap-1 overflow-x-auto scrollbar-hide pb-0.5">
+          {weekDays.map(day => {
+            const daySlots = mealPlan?.days?.[day.dateKey] || [];
+            const isSelected = mobileViewMode === 'single' && mobileActiveDateKey === day.dateKey;
+            const hasMeals = daySlots.length > 0;
+            const hasDining = calendarInsights?.[day.dateKey]?.hasDiningOut;
+            const isBusy = calendarInsights?.[day.dateKey]?.isBusyEvening;
+
+            return (
+              <button
+                key={day.dateKey}
+                onClick={() => {
+                  setMobileViewMode('single');
+                  setMobileActiveDateKey(day.dateKey);
+                }}
+                className={cn(
+                  "flex flex-col items-center justify-center py-2 px-2.5 min-w-[50px] flex-1 rounded-xl text-center transition-all relative",
+                  isSelected
+                    ? "bg-amber-500 text-white font-bold shadow-sm"
+                    : day.isToday
+                      ? "bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-800"
+                      : "text-stone-600 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-stone-800"
+                )}
+              >
+                <span className="text-[10px] uppercase font-bold tracking-wider opacity-85">
+                  {day.shortName}
+                </span>
+                <span className={cn("text-xs font-serif font-bold mt-0.5", isSelected ? "text-white" : "text-stone-900 dark:text-stone-100")}>
+                  {day.dateObj.getDate()}
+                </span>
+                
+                {/* Status Dot / Meal Badge */}
+                <div className="flex items-center gap-0.5 mt-1">
+                  {hasMeals && (
+                    <span className={cn(
+                      "w-1.5 h-1.5 rounded-full",
+                      isSelected ? "bg-white" : "bg-amber-500"
+                    )} />
+                  )}
+                  {hasDining && <span className="text-[9px] leading-none">🍷</span>}
+                  {isBusy && !hasDining && <span className="text-[9px] leading-none">⚡</span>}
+                  {!hasMeals && !hasDining && !isBusy && <span className="w-1.5 h-1.5 rounded-full bg-transparent" />}
+                </div>
+              </button>
+            );
+          })}
+
+          {/* Full Week Toggle Button */}
+          <button
+            onClick={() => setMobileViewMode(prev => prev === 'all' ? 'single' : 'all')}
+            className={cn(
+              "flex flex-col items-center justify-center py-2 px-2.5 min-w-[54px] rounded-xl text-center transition-all shrink-0 border ml-1",
+              mobileViewMode === 'all'
+                ? "bg-stone-800 dark:bg-stone-100 text-white dark:text-stone-900 border-stone-800 dark:border-stone-100 font-bold shadow-sm"
+                : "bg-stone-50 dark:bg-stone-800 text-stone-600 dark:text-stone-300 border-stone-200 dark:border-stone-700 hover:bg-stone-100"
+            )}
+            title="Toggle All Days Full Week view"
+          >
+            <Calendar className="w-3.5 h-3.5 mb-0.5" />
+            <span className="text-[10px] font-bold leading-tight">All Days</span>
+          </button>
         </div>
       </div>
 
@@ -1154,15 +1273,20 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
       )}
 
       {/* 7-Day Board Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-7 gap-4">
-        {weekDays.map(day => {
+      <div className={cn(
+        "grid gap-4",
+        mobileViewMode === 'single' ? "grid-cols-1 lg:grid-cols-7" : "grid-cols-1 md:grid-cols-2 lg:grid-cols-7"
+      )}>
+        {weekDays.map((day, dIdx) => {
           const daySlots = mealPlan?.days?.[day.dateKey] || [];
+          const isSingleHiddenOnMobile = mobileViewMode === 'single' && mobileActiveDateKey !== day.dateKey;
           
           return (
             <div 
               key={day.dateKey}
               className={cn(
-                "flex flex-col rounded-3xl p-4 transition-all border",
+                "flex-col rounded-3xl p-4 transition-all border",
+                isSingleHiddenOnMobile ? "hidden lg:flex" : "flex",
                 day.isToday 
                   ? "bg-stone-50/90 dark:bg-stone-900/90 border-amber-500/40 dark:border-amber-500/40 ring-2 ring-amber-500/10 shadow-sm" 
                   : "bg-white dark:bg-stone-900 border-stone-200/80 dark:border-stone-800"
@@ -1171,23 +1295,53 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
               {/* Day Header */}
               <div className="pb-2.5 mb-2.5 border-b border-stone-100 dark:border-stone-800 space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-serif font-bold text-base text-stone-900 dark:text-stone-100">
-                        {day.shortName}
-                      </span>
-                      {day.isToday && (
-                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500 text-white uppercase tracking-wider">
-                          Today
+                  <div className="flex items-center gap-2">
+                    {/* Mobile Prev Day Arrow */}
+                    {mobileViewMode === 'single' && (
+                      <button
+                        onClick={() => {
+                          const prevIdx = (dIdx - 1 + weekDays.length) % weekDays.length;
+                          setMobileActiveDateKey(weekDays[prevIdx].dateKey);
+                        }}
+                        className="lg:hidden p-1 text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 rounded-full hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors"
+                        title="Previous Day"
+                        aria-label="Previous Day"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                    )}
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-serif font-bold text-base text-stone-900 dark:text-stone-100">
+                          {day.dayName}
                         </span>
-                      )}
+                        {day.isToday && (
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500 text-white uppercase tracking-wider">
+                            Today
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-xs text-stone-400 dark:text-stone-500 font-medium">
+                        {day.monthDay}
+                      </span>
                     </div>
-                    <span className="text-xs text-stone-400 dark:text-stone-500 font-medium">
-                      {day.monthDay}
-                    </span>
                   </div>
 
                   <div className="flex items-center gap-1">
+                    {/* Mobile Next Day Arrow */}
+                    {mobileViewMode === 'single' && (
+                      <button
+                        onClick={() => {
+                          const nextIdx = (dIdx + 1) % weekDays.length;
+                          setMobileActiveDateKey(weekDays[nextIdx].dateKey);
+                        }}
+                        className="lg:hidden p-1 text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 rounded-full hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors mr-1"
+                        title="Next Day"
+                        aria-label="Next Day"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    )}
                     {daySlots.length > 0 && (
                       <button
                         onClick={() => handleClearDay(day.dateKey)}
@@ -1212,7 +1366,7 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                   <div className="flex flex-wrap gap-1">
                     {calendarInsights[day.dateKey].hasDiningOut && (
                       <span 
-                        title={`Google Calendar: ${calendarInsights[day.dateKey].diningOutEvents.map(e => e.summary).join(', ')}`}
+                        title={`Google Calendar: ${calendarInsights[day.dateKey].diningOutEvents.map(e => `${e.summary}${e.calendarSummary ? ` [${e.calendarSummary}]` : ''}`).join(', ')}`}
                         className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700/80 cursor-help"
                       >
                         <span>🍷</span>
@@ -1221,7 +1375,7 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                     )}
                     {calendarInsights[day.dateKey].isBusyEvening && (
                       <span 
-                        title={`Google Calendar: Busy evening (${calendarInsights[day.dateKey].busyEveningEvents.map(e => e.summary).join(', ')})`}
+                        title={`Google Calendar: Busy evening (${calendarInsights[day.dateKey].busyEveningEvents.map(e => `${e.summary}${e.calendarSummary ? ` [${e.calendarSummary}]` : ''}`).join(', ')})`}
                         className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-indigo-100 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200 border border-indigo-300 dark:border-indigo-700/80 cursor-help"
                       >
                         <span>⚡</span>
@@ -1315,7 +1469,7 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                             <button
                               onClick={() => handleDeleteSlot(day.dateKey, slot.id)}
                               title="Remove from meal plan"
-                              className="p-1 opacity-0 group-hover/slot:opacity-100 text-stone-300 hover:text-red-500 transition-opacity"
+                              className="p-1 opacity-70 sm:opacity-0 sm:group-hover/slot:opacity-100 text-stone-400 hover:text-red-500 transition-opacity"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -1613,6 +1767,9 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                           placeholder="Search your recipes..."
                           value={recipeSearchQuery}
                           onChange={(e) => setRecipeSearchQuery(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') e.preventDefault();
+                          }}
                           className="w-full pl-9 pr-3 py-2 rounded-xl text-sm border border-stone-200 dark:border-stone-700 bg-stone-50 dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-amber-500/20"
                         />
                       </div>
@@ -1755,15 +1912,23 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                   type="button"
                   onClick={handleAddMealSubmit}
                   disabled={
-                    activeTab === 'recipe' 
+                    isAddingMeal ||
+                    (activeTab === 'recipe' 
                       ? !selectedRecipeId 
                       : activeTab === 'dining'
                         ? !customDiningPlace.trim()
-                        : !customTitle.trim()
+                        : !customTitle.trim())
                   }
-                  className="px-5 py-2 rounded-full text-xs font-semibold bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 hover:bg-stone-800 disabled:opacity-50 transition-all"
+                  className="px-5 py-2 rounded-full text-xs font-semibold bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 hover:bg-stone-800 disabled:opacity-50 transition-all flex items-center gap-1.5"
                 >
-                  Add to Meal Plan
+                  {isAddingMeal ? (
+                    <>
+                      <span className="w-3 h-3 border-2 border-white/40 border-t-white dark:border-stone-900/40 dark:border-t-stone-900 rounded-full animate-spin" />
+                      <span>Adding...</span>
+                    </>
+                  ) : (
+                    <span>Add to Meal Plan</span>
+                  )}
                 </button>
               </div>
             </motion.div>

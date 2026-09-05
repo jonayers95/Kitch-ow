@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { extractRecipeFromHtml, normalizeRecipeUrl } from "./src/utils/recipeExtractor";
 
 dotenv.config();
 
@@ -25,7 +26,7 @@ async function generateContentWithFallback(
     contents: any;
     config?: any;
   },
-  models: string[] = ["gemini-3.7-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
+  models: string[] = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
 ) {
   let lastError: any = null;
 
@@ -174,6 +175,25 @@ function generateSmartFallbackMealPlan(
           isDiningOut: true,
           diningOutPlace: diningName,
           reason: `Auto-reserved for Google Calendar scheduled event: "${diningName}"`,
+        });
+        return;
+      }
+
+      // Auto-suggest dining out / takeout on busy evenings if setting is enabled
+      const shouldSuggestEatOutOnBusy = calendarOptions?.suggestEatOutOnPacked || 
+        calendarOptions?.diningOutBalance === 'busy_nights' || 
+        calendarOptions?.diningOutBalance === 'balanced' || 
+        calendarOptions?.diningOutBalance === 'frequent';
+
+      if (mealType === "Dinner" && isBusyEvening && shouldSuggestEatOutOnBusy) {
+        const busySummary = dayCalendar?.busyEvents?.[0] || dayCalendar?.busyEveningEvents?.[0]?.summary || "Packed schedule";
+        dayMeals.push({
+          mealType: "Dinner",
+          recipeId: "dining_out",
+          recipeTitle: "Dining Out / Takeout (Busy Night)",
+          isDiningOut: true,
+          diningOutPlace: "Takeout / Local Favorite",
+          reason: `Take the night off cooking! Automated dinner relief for packed evening (${busySummary}).`,
         });
         return;
       }
@@ -582,53 +602,131 @@ async function startServer() {
   app.post("/api/gemini/extract-url", async (req, res) => {
     try {
       const { url } = req.body;
-      if (!url || !url.startsWith("http")) {
-        return res.status(400).json({ error: "Please enter a valid URL starting with http:// or https://" });
+      if (!url || typeof url !== "string") {
+        return res.status(400).json({ error: "Please enter a valid recipe URL." });
       }
 
+      let normalizedUrl = "";
+      try {
+        normalizedUrl = normalizeRecipeUrl(url);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || "Please enter a valid URL starting with http:// or https://" });
+      }
+
+      console.log(`[Extract URL] Processing URL: ${normalizedUrl}`);
+
+      // 1. Direct Web Fetch & Schema.org JSON-LD Extraction (Fast, reliable, and preserves Gemini API quota)
+      let html = "";
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        const fetchRes = await fetch(normalizedUrl, {
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+        });
+        clearTimeout(timeoutId);
+        if (fetchRes.ok) {
+          html = await fetchRes.text();
+        } else {
+          console.warn(`[Extract URL] Direct fetch returned status ${fetchRes.status}`);
+        }
+      } catch (fetchErr: any) {
+        console.warn(`[Extract URL] Direct fetch notice: ${fetchErr?.message || fetchErr}`);
+      }
+
+      // If HTML was retrieved, parse Schema.org JSON-LD & structured markup
+      if (html) {
+        const directRecipe = extractRecipeFromHtml(html, normalizedUrl);
+        if (directRecipe && directRecipe.ingredients.length > 0 && directRecipe.instructions.length > 0) {
+          console.log(`[Extract URL] Successfully extracted recipe "${directRecipe.title}" directly from JSON-LD/HTML!`);
+          return res.json(directRecipe);
+        }
+      }
+
+      // 2. If direct extraction didn't yield a complete recipe or fetch was blocked, try Gemini
+      const cleanedHtmlText = html
+        ? html
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
+            .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/\s+/g, " ")
+            .slice(0, 10000)
+        : "";
+
       const contents = [
-        { text: `I need you to extract a recipe from this specific URL: ${url}` },
+        { text: `Extract the full recipe from this URL: ${normalizedUrl}${cleanedHtmlText ? `\n\nPage text excerpt:\n${cleanedHtmlText}` : ""}` },
         {
-          text: `Please use your tools to access the content of the page at ${url}.
-CRITICAL INSTRUCTION: Many recipe pages are very long and filled with ads or life stories. To find the actual recipe, you MUST search the page content for the exact words "ingredients", "directions", or "instructions". The recipe will be located near these keywords.
-
-Extract the following information in JSON format:
+          text: `Extract the following recipe fields in valid JSON:
 - title: The name of the recipe
-- ingredients: An array of strings, each being one ingredient with its amount
-- instructions: An array of strings, each being one step of the recipe
+- ingredients: An array of strings, each being one ingredient with measurement
+- instructions: An array of strings, each being one sequential instruction step
 - category: One of [Breakfast, Lunch, Dinner, Dessert, Snack, Drink, Other]
-- estimatedTime: The estimated total time to make this recipe in minutes (number)
+- estimatedTime: Estimated total preparation/cooking time in minutes (number)
 
-Focus only on the recipe itself. Ignore the blog post text, ads, and comments.`,
+Extract only real recipe information. Ignore ads, social links, and author notes.`,
         },
       ];
 
-      const ai = getGenAI();
-      const response = await generateContentWithFallback(ai, {
-        contents,
-        config: {
-          tools: [{ urlContext: {} }, { googleSearch: {} }],
+      try {
+        const ai = getGenAI();
+        const config: any = {
           responseMimeType: "application/json",
           responseSchema: recipeSchema,
-        },
-      });
+        };
+        // Use googleSearch tool if direct HTML could not be fetched
+        if (!cleanedHtmlText) {
+          config.tools = [{ googleSearch: {} }];
+        }
 
-      const text = response.text;
-      if (!text || text.trim() === "{}" || text.trim() === "[]") {
-        return res.status(422).json({ error: "Could not find a structured recipe on this webpage." });
+        const response = await generateContentWithFallback(ai, {
+          contents,
+          config,
+        }, ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]);
+
+        const text = response.text;
+        if (text && text.trim() !== "{}" && text.trim() !== "[]") {
+          const jsonStr = text.replace(/```json\n?|\n?```/g, "").trim();
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.title) {
+            return res.json({ ...parsed, sourceUrl: normalizedUrl });
+          }
+        }
+      } catch (aiErr: any) {
+        console.warn("[Extract URL] AI extraction attempt failed:", aiErr?.message || aiErr);
       }
 
-      const jsonStr = text.replace(/```json\n?|\n?```/g, "").trim();
-      const parsed = JSON.parse(jsonStr);
-      return res.json(parsed);
-    } catch (error: any) {
-      console.error("Error extracting recipe:", error);
-      const isUnavailable = error?.status === 503 || (error?.message && error.message.includes("503"));
-      return res.status(isUnavailable ? 503 : 500).json({
-        error: isUnavailable
-          ? "The AI model is experiencing peak demand right now. Please wait a moment and retry."
-          : error.message || "Failed to extract recipe from URL.",
+      // 3. Fallback: If AI call failed (e.g. quota limit), check if we have any partial recipe from HTML
+      if (html) {
+        const partialRecipe = extractRecipeFromHtml(html, normalizedUrl);
+        if (partialRecipe && (partialRecipe.title || partialRecipe.ingredients.length > 0)) {
+          console.log(`[Extract URL] Returning partial recipe from HTML metadata: "${partialRecipe.title}"`);
+          return res.json(partialRecipe);
+        }
+      }
+
+      return res.status(422).json({
+        error: "Could not extract recipe details from this webpage. Please check the URL or add the recipe details manually.",
       });
+    } catch (error: any) {
+      console.error("Error in extract-url endpoint:", error);
+      const isUnavailable = error?.status === 503 || (error?.message && error.message.includes("503"));
+      const isQuota = error?.status === 429 || (error?.message && (error.message.includes("429") || error.message.includes("RESOURCE_EXHAUSTED")));
+      
+      let message = error.message || "Failed to extract recipe from URL.";
+      let statusCode = 500;
+      if (isQuota) {
+        statusCode = 429;
+        message = "Recipe AI extraction quota is temporarily reached. You can add this recipe manually, or try again shortly.";
+      } else if (isUnavailable) {
+        statusCode = 503;
+        message = "The service is temporarily busy. Please wait a moment and retry.";
+      }
+
+      return res.status(statusCode).json({ error: message });
     }
   });
 
@@ -778,6 +876,18 @@ VARIETY VS CONSISTENCY STRATEGY: MAXIMUM EXPLORATION & 100% UNIQUE MEALS (Level 
           ...(householdProfile.customDislikedIngredients ? householdProfile.customDislikedIngredients.split(",").map((s: string) => s.trim()).filter(Boolean) : [])
         ];
 
+        const diningBalance = householdProfile.diningOutBalance || (householdProfile.suggestDiningOutOnBusy ? "busy_nights" : "always_cook");
+        let diningGuidelines = "";
+        if (diningBalance === "busy_nights" || householdProfile.suggestDiningOutOnBusy || calendarOptions?.suggestEatOutOnPacked) {
+          diningGuidelines = `- Dining Out & Takeout Balancing Mode: "Auto-Relief on Busy Evenings" (ACTIVE). Whenever an evening has busy calendar events or schedule pressure, do NOT assign a home-cooked dinner. Instead, suggest takeout or eating out: set isDiningOut=true, recipeId="dining_out", recipeTitle="Takeout / Dining Out (Busy Night)", diningOutPlace="${householdProfile.diningOutCustomNotes || "Takeout / Favorite Restaurant"}", reason="Auto-suggested for busy schedule to save cooking effort."`;
+        } else if (diningBalance === "balanced") {
+          const prefDays = householdProfile.preferredDiningOutDays?.length ? householdProfile.preferredDiningOutDays.join(", ") : "Friday / Weekend";
+          diningGuidelines = `- Dining Out & Takeout Balancing Mode: "Weekly Balanced Rhythm" (ACTIVE). Balance 1-2 meals across the week with dining out or takeout (especially on busy evenings or preferred days: ${prefDays}). Mark those slots with isDiningOut=true, recipeId="dining_out", recipeTitle="Takeout / Dining Out Night", diningOutPlace="${householdProfile.diningOutCustomNotes || "Takeout / Local Favorite"}".`;
+        } else if (diningBalance === "frequent") {
+          const prefDays = householdProfile.preferredDiningOutDays?.length ? householdProfile.preferredDiningOutDays.join(", ") : "Friday, Saturday, or busy nights";
+          diningGuidelines = `- Dining Out & Takeout Balancing Mode: "Frequent Takeout / Low Effort" (ACTIVE). Incorporate 2-3 dining out or takeout meals per week (targeting ${prefDays}). Mark those slots with isDiningOut=true, recipeId="dining_out".`;
+        }
+
         profileGuidelines = `
 HOUSEHOLD KITCHEN & DIETARY PROFILE (MANDATORY HOUSEHOLD CONSTRAINTS):
 ${allAppliances.length > 0 ? `- Kitchen Equipment Available: ${allAppliances.join(", ")} (favor cooking techniques matching this gear)` : ""}
@@ -785,6 +895,7 @@ ${allDietary.length > 0 ? `- Dietary Restrictions: ${allDietary.join(", ")} (CRI
 ${allDislikes.length > 0 ? `- Disliked Ingredients: ${allDislikes.join(", ")} (CRITICAL: Avoid recipes containing these ingredients)` : ""}
 ${householdProfile.defaultServings ? `- Household Servings: ${householdProfile.defaultServings} people` : ""}
 ${householdProfile.notes ? `- Household Kitchen Notes: "${householdProfile.notes}"` : ""}
+${diningGuidelines}
 `;
       }
 

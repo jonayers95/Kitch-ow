@@ -17,8 +17,9 @@ async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
+    // getDocFromServer can fail when offline or before initial sync; log debug info only if unexpected
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration. The client is offline.");
+      console.warn("Firestore client is currently initializing in offline mode or waiting for connection.");
     }
   }
 }

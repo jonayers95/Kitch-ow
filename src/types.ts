@@ -16,6 +16,17 @@ export interface MealSlot {
   calendarEventSummary?: string;
 }
 
+export interface GoogleCalendarListItem {
+  id: string;
+  summary: string;
+  description?: string;
+  primary?: boolean;
+  selected?: boolean;
+  backgroundColor?: string;
+  foregroundColor?: string;
+  accessRole?: string;
+}
+
 export interface GoogleCalendarEvent {
   id: string;
   summary: string;
@@ -31,6 +42,9 @@ export interface GoogleCalendarEvent {
   busyKeywords?: string[];
   startTimeFormatted?: string;
   endTimeFormatted?: string;
+  calendarId?: string;
+  calendarSummary?: string;
+  calendarColor?: string;
 }
 
 export interface DayCalendarInsights {
@@ -49,10 +63,14 @@ export interface WeekCalendarInsights {
   [dateStr: string]: DayCalendarInsights;
 }
 
+export type DiningOutBalanceMode = 'always_cook' | 'busy_nights' | 'balanced' | 'frequent';
+
 export interface CalendarPlannerOptions {
   autoOmitDiningOut: boolean;
   prioritizeQuickOnBusy: boolean;
   suggestEatOutOnPacked: boolean;
+  diningOutBalance?: DiningOutBalanceMode;
+  targetDiningOutCount?: number;
 }
 
 export interface MealPlan {
@@ -92,6 +110,11 @@ export interface HouseholdKitchenProfile {
   customDislikedIngredients?: string;
   defaultServings?: number;
   notes?: string;
+  diningOutBalance?: DiningOutBalanceMode;
+  suggestDiningOutOnBusy?: boolean;
+  maxDiningOutPerWeek?: number;
+  preferredDiningOutDays?: string[];
+  diningOutCustomNotes?: string;
 }
 
 export interface Household {
