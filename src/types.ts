@@ -122,6 +122,7 @@ export interface Household {
   name: string;
   ownerId: string;
   members: { [userId: string]: 'admin' | 'member' | 'viewer' };
+  memberIds?: string[];
   createdAt?: Timestamp;
   isStock?: boolean;
   kitchenProfile?: HouseholdKitchenProfile;

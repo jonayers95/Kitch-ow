@@ -1121,7 +1121,7 @@ GUIDELINES:
   // Vite middleware in development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true, host: "0.0.0.0", port: 3000 },
+      server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);

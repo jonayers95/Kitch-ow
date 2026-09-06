@@ -38,6 +38,14 @@ import {
   extractRecipeFromUrl,
   generateRecipeImage
 } from './services/geminiService';
+import {
+  subscribeToUserHouseholds,
+  getPersistedActiveHouseholdId,
+  setPersistedActiveHouseholdId,
+  createHouseholdWithStarterPack,
+  addMemberToHousehold,
+  removeMemberFromHousehold
+} from './services/householdService';
 import { STOCK_RECIPES } from './data/stockRecipes';
 import { WeeklyMealPlan } from './components/WeeklyMealPlan';
 import { SurpriseMeModal } from './components/SurpriseMeModal';
@@ -407,10 +415,12 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Fetch Households
+  // Fetch Households with cross-session persistence and multi-query hydration
   useEffect(() => {
     if (!user) {
       setHouseholdsLoading(false);
+      setHouseholds([]);
+      setSelectedHousehold(null);
       return;
     }
     setHouseholdsLoading(true);
@@ -418,35 +428,52 @@ export default function App() {
     // Defensive fallback timeout so the UI is never stuck on infinite loader
     const safetyTimer = setTimeout(() => {
       setHouseholdsLoading(false);
-    }, 2500);
+    }, 4000);
 
-    const q = query(collection(db, 'households'), where(`members.${user.uid}`, 'in', ['admin', 'member', 'viewer']));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      clearTimeout(safetyTimer);
-      const h = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Household));
-      setHouseholds(h);
-      setHouseholdsLoading(false);
-      if (h.length > 0) {
-        setSelectedHousehold(prev => {
-          if (!prev) return h[0];
-          const updated = h.find(hh => hh.id === prev.id);
-          return updated || h[0];
-        });
-      } else {
-        setSelectedHousehold(null);
+    const unsubscribe = subscribeToUserHouseholds(
+      user,
+      (updatedHouseholds) => {
+        clearTimeout(safetyTimer);
+        setHouseholds(updatedHouseholds);
+        setHouseholdsLoading(false);
+
+        if (updatedHouseholds.length > 0) {
+          const savedActiveId = getPersistedActiveHouseholdId(user.uid);
+          setSelectedHousehold((prev) => {
+            if (prev) {
+              const stillExists = updatedHouseholds.find((hh) => hh.id === prev.id);
+              if (stillExists) return stillExists;
+            }
+            if (savedActiveId) {
+              const matched = updatedHouseholds.find((hh) => hh.id === savedActiveId);
+              if (matched) return matched;
+            }
+            return updatedHouseholds[0];
+          });
+        } else {
+          setSelectedHousehold(null);
+        }
+      },
+      (error) => {
+        clearTimeout(safetyTimer);
+        console.warn('Household listener notice:', error);
+        handleFirestoreError(error, OperationType.LIST, 'households');
+        setHouseholdsLoading(false);
       }
-    }, (error) => {
-      clearTimeout(safetyTimer);
-      console.warn('Household listener notice:', error);
-      handleFirestoreError(error, OperationType.LIST, 'households');
-      setHouseholdsLoading(false);
-    });
+    );
 
     return () => {
       clearTimeout(safetyTimer);
       unsubscribe();
     };
   }, [user]);
+
+  // Keep active household ID in sync across user sessions
+  useEffect(() => {
+    if (user && selectedHousehold?.id) {
+      setPersistedActiveHouseholdId(user.uid, selectedHousehold.id);
+    }
+  }, [user, selectedHousehold?.id]);
 
   // Fetch Recipes
   useEffect(() => {
@@ -657,42 +684,9 @@ export default function App() {
     if (!user) return;
     setIsProcessing(true);
     try {
-      const newH = {
-        name,
-        ownerId: user.uid,
-        members: { [user.uid]: 'admin' },
-        createdAt: serverTimestamp()
-      };
-      const docRef = await addDoc(collection(db, 'households'), newH);
-      
-      // Batch add stock recipes to the new household for blazing speed & reliability
-      try {
-        const batch = writeBatch(db);
-        for (const recipe of STOCK_RECIPES) {
-          const cleanedRecipe = {
-            title: recipe.title?.trim() || "Untitled Recipe",
-            category: (recipe.category as Category) || "Other",
-            rating: recipe.rating || 5,
-            estimatedTime: recipe.estimatedTime || 30,
-            sourceUrl: recipe.sourceUrl || "",
-            imageUrl: recipe.imageUrl || "",
-            ingredients: Array.isArray(recipe.ingredients) ? recipe.ingredients : [],
-            instructions: Array.isArray(recipe.instructions) ? recipe.instructions : [],
-            isStock: true,
-            isStaple: !!recipe.isStaple,
-            authorId: user.uid,
-            householdId: docRef.id,
-            createdAt: serverTimestamp(),
-          };
-          const rRef = doc(collection(db, 'recipes'));
-          batch.set(rRef, cleanedRecipe);
-        }
-        await batch.commit();
-      } catch (seedErr) {
-        console.warn("Notice: Starter recipes auto-population fallback:", seedErr);
-      }
-
-      setSelectedHousehold({ id: docRef.id, ...newH } as Household);
+      const createdHousehold = await createHouseholdWithStarterPack(user, name);
+      setHouseholds(prev => [createdHousehold, ...prev.filter(h => h.id !== createdHousehold.id)]);
+      setSelectedHousehold(createdHousehold);
       setIsHouseholdModalOpen(false);
       setPlanSuccessToast(`Family kitchen "${name}" created with 32 starter recipes!`);
       setTimeout(() => setPlanSuccessToast(null), 3500);
@@ -1045,10 +1039,7 @@ export default function App() {
   const handleAddMember = async (userId: string, role: 'admin' | 'member' | 'viewer' = 'member') => {
     if (!selectedHousehold || !user || selectedHousehold.ownerId !== user.uid) return;
     try {
-      const hRef = doc(db, 'households', selectedHousehold.id);
-      await updateDoc(hRef, {
-        [`members.${userId}`]: role
-      });
+      await addMemberToHousehold(selectedHousehold.id!, userId, role);
     } catch (error) {
       console.error("Failed to add member:", error);
       alert("Failed to add member. Please check the User ID and try again.");
@@ -1062,10 +1053,7 @@ export default function App() {
       return;
     }
     try {
-      const hRef = doc(db, 'households', selectedHousehold.id);
-      await updateDoc(hRef, {
-        [`members.${userId}`]: deleteField()
-      });
+      await removeMemberFromHousehold(selectedHousehold.id!, userId);
     } catch (error) {
       console.error("Failed to remove member:", error);
       alert("Failed to remove member. Please try again.");
@@ -2027,7 +2015,13 @@ export default function App() {
               {households.map(h => (
                 <button
                   key={h.id}
-                  onClick={() => { setSelectedHousehold(h); setIsHouseholdModalOpen(false); }}
+                  onClick={() => { 
+                    setSelectedHousehold(h); 
+                    if (user && h.id) {
+                      setPersistedActiveHouseholdId(user.uid, h.id);
+                    }
+                    setIsHouseholdModalOpen(false); 
+                  }}
                   className={cn(
                     "flex items-center justify-between p-4 rounded-2xl border transition-all",
                     selectedHousehold?.id === h.id 

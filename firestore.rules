@@ -20,7 +20,8 @@ service cloud.firestore {
     function isHouseholdMember(householdData) {
       return isAuthenticated() && (
         householdData.ownerId == request.auth.uid ||
-        (householdData.members != null && request.auth.uid in householdData.members)
+        (householdData.members != null && request.auth.uid in householdData.members) ||
+        (householdData.memberIds != null && householdData.memberIds is list && request.auth.uid in householdData.memberIds)
       );
     }
 
@@ -41,7 +42,8 @@ service cloud.firestore {
     function isValidHousehold(data) {
       return hasRequiredFields(['name', 'ownerId', 'members']) &&
              data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
-             data.members is map;
+             data.members is map &&
+             (!('memberIds' in data) || (data.memberIds is list && data.memberIds.size() <= 100));
     }
 
     // ===============================================================
@@ -59,7 +61,12 @@ service cloud.firestore {
     }
 
     match /households/{householdId} {
-      allow read: if isAuthenticated() && (isHouseholdMember(resource.data) || isAdmin());
+      allow get: if isAuthenticated() && (isHouseholdMember(resource.data) || isAdmin());
+      allow list: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        (resource.data.memberIds != null && request.auth.uid in resource.data.memberIds) ||
+        isAdmin()
+      );
       allow create: if isAuthenticated() && 
                       (request.resource.data.ownerId == request.auth.uid || isAdmin()) &&
                       isValidHousehold(request.resource.data);

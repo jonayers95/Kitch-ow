@@ -29,6 +29,11 @@
           "type": "object", 
           "description": "Map of user UIDs to their roles (e.g., 'admin', 'member', 'viewer')" 
         },
+        "memberIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Array of member and owner UIDs for direct array-contains queries"
+        },
         "kitchenProfile": {
           "type": "object",
           "description": "Household kitchen equipment, dietary constraints, and disliked ingredients",
