@@ -69,14 +69,35 @@
       "type": "object",
       "properties": {
         "displayName": { "type": "string" },
-        "photoURL": { "type": "string" }
+        "photoURL": { "type": "string" },
+        "email": { "type": "string" }
       }
+    },
+    "HouseholdInvite": {
+      "title": "Household Invite",
+      "description": "An invitation sent to a user by email or UID to join a household.",
+      "type": "object",
+      "properties": {
+        "householdId": { "type": "string", "description": "ID of the household" },
+        "householdName": { "type": "string", "description": "Display name of the household" },
+        "invitedByUid": { "type": "string", "description": "UID of the user who sent the invite" },
+        "invitedByName": { "type": "string", "description": "Display name of inviter" },
+        "invitedByEmail": { "type": "string", "description": "Email of inviter" },
+        "inviteeEmail": { "type": "string", "description": "Lowercase email of invitee" },
+        "inviteeUid": { "type": "string", "description": "Target UID if invited directly" },
+        "role": { "type": "string", "enum": ["admin", "member", "viewer"], "description": "Role to be granted upon acceptance" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "rejected", "canceled"], "description": "Invitation status" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["householdId", "householdName", "invitedByUid", "role", "status"]
     }
   },
   "firestore": {
     "/recipes/{recipeId}": { "schema": "Recipe", "description": "Collection of all recipes" },
     "/mealPlans/{mealPlanId}": { "schema": "MealPlan", "description": "Weekly meal plans" },
     "/households/{householdId}": { "schema": "Household", "description": "Collection of households" },
-    "/users/{userId}": { "schema": "UserProfile", "description": "Public user profiles" }
+    "/users/{userId}": { "schema": "UserProfile", "description": "Public user profiles" },
+    "/household_invites/{inviteId}": { "schema": "HouseholdInvite", "description": "Household invitations" }
   }
 }

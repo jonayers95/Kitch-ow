@@ -71,9 +71,42 @@ service cloud.firestore {
                       (request.resource.data.ownerId == request.auth.uid || isAdmin()) &&
                       isValidHousehold(request.resource.data);
       allow update: if isAuthenticated() && 
-                      (isHouseholdMember(resource.data) || isAdmin()) &&
+                      (
+                        isHouseholdMember(resource.data) || 
+                        // Allow an authenticated user to add themselves to memberIds & members when joining
+                        (
+                          request.resource.data.ownerId == resource.data.ownerId &&
+                          request.resource.data.name == resource.data.name &&
+                          request.auth.uid in request.resource.data.memberIds &&
+                          request.auth.uid in request.resource.data.members
+                        ) ||
+                        isAdmin()
+                      ) &&
                       isValidHousehold(request.resource.data);
       allow delete: if (isAuthenticated() && resource.data.ownerId == request.auth.uid) || isAdmin();
+    }
+
+    match /household_invites/{inviteId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() &&
+                      request.resource.data.invitedByUid == request.auth.uid &&
+                      request.resource.data.status == 'pending' &&
+                      hasRequiredFields(['householdId', 'householdName', 'invitedByUid', 'role', 'status']);
+      allow update: if isAuthenticated() && (
+                      // Invitee accepting or rejecting
+                      (
+                        (resource.data.inviteeUid == request.auth.uid || 
+                         (resource.data.inviteeEmail != null && request.auth.token.email != null && resource.data.inviteeEmail == request.auth.token.email)) &&
+                        request.resource.data.status in ['accepted', 'rejected']
+                      ) ||
+                      // Inviter canceling
+                      (
+                        resource.data.invitedByUid == request.auth.uid &&
+                        request.resource.data.status in ['canceled', 'rejected']
+                      ) ||
+                      isAdmin()
+                    );
+      allow delete: if isAuthenticated() && (resource.data.invitedByUid == request.auth.uid || isAdmin());
     }
 
     match /recipes/{recipeId} {

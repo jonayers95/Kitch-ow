@@ -132,6 +132,25 @@ export interface UserProfile {
   uid: string;
   displayName: string;
   photoURL?: string;
+  email?: string;
+}
+
+export type HouseholdInviteRole = 'admin' | 'member' | 'viewer';
+export type HouseholdInviteStatus = 'pending' | 'accepted' | 'rejected' | 'canceled';
+
+export interface HouseholdInvite {
+  id?: string;
+  householdId: string;
+  householdName: string;
+  invitedByUid: string;
+  invitedByName?: string;
+  invitedByEmail?: string;
+  inviteeEmail?: string;
+  inviteeUid?: string;
+  role: HouseholdInviteRole;
+  status: HouseholdInviteStatus;
+  createdAt?: Timestamp | any;
+  updatedAt?: Timestamp | any;
 }
 
 declare global {

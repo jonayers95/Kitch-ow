@@ -32,7 +32,9 @@ import {
   Category,
   MealSlot,
   MealType,
-  HouseholdKitchenProfile
+  HouseholdKitchenProfile,
+  HouseholdInvite,
+  HouseholdInviteRole
 } from './types';
 import { 
   extractRecipeFromUrl,
@@ -46,6 +48,15 @@ import {
   addMemberToHousehold,
   removeMemberFromHousehold
 } from './services/householdService';
+import {
+  sendHouseholdInvite,
+  acceptHouseholdInvite,
+  rejectHouseholdInvite,
+  cancelHouseholdInvite,
+  subscribeToPendingInvitesForUser,
+  subscribeToHouseholdPendingInvites
+} from './services/householdInviteService';
+import { HouseholdInvitesBanner } from './components/HouseholdInvitesBanner';
 import { STOCK_RECIPES } from './data/stockRecipes';
 import { WeeklyMealPlan } from './components/WeeklyMealPlan';
 import { SurpriseMeModal } from './components/SurpriseMeModal';
@@ -85,7 +96,11 @@ import {
   Ban,
   FileJson,
   Download,
-  Upload
+  Upload,
+  Mail,
+  Check,
+  Send,
+  UserPlus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -391,6 +406,17 @@ export default function App() {
 
   const [recipeFormError, setRecipeFormError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedEmail, setCopiedEmail] = useState(false);
+
+  // Household Invitations State
+  const [pendingInvites, setPendingInvites] = useState<HouseholdInvite[]>([]);
+  const [householdSentInvites, setHouseholdSentInvites] = useState<HouseholdInvite[]>([]);
+  const [isProcessingInviteId, setIsProcessingInviteId] = useState<string | null>(null);
+  const [inviteTargetInput, setInviteTargetInput] = useState('');
+  const [inviteRoleInput, setInviteRoleInput] = useState<HouseholdInviteRole>('member');
+  const [isSendingInvite, setIsSendingInvite] = useState(false);
+  const [inviteFormError, setInviteFormError] = useState<string | null>(null);
+  const [inviteFormSuccess, setInviteFormSuccess] = useState<string | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
@@ -404,8 +430,9 @@ export default function App() {
           if (!userDoc.exists()) {
             await setDoc(doc(db, 'users', u.uid), {
               displayName: u.displayName || 'Anonymous Chef',
-              photoURL: u.photoURL || ''
-            });
+              photoURL: u.photoURL || '',
+              email: u.email || ''
+            }, { merge: true });
           }
         } catch (err) {
           console.warn("User profile sync notice:", err);
@@ -414,6 +441,37 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  // Subscribe to pending invitations addressed to the logged-in user
+  useEffect(() => {
+    if (!user) {
+      setPendingInvites([]);
+      return;
+    }
+
+    const unsubscribe = subscribeToPendingInvitesForUser(user, (invites) => {
+      setPendingInvites(invites);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Subscribe to pending invitations sent from the currently selected household
+  useEffect(() => {
+    if (!selectedHousehold?.id) {
+      setHouseholdSentInvites([]);
+      return;
+    }
+
+    const unsubscribe = subscribeToHouseholdPendingInvites(
+      selectedHousehold.id,
+      (invites) => {
+        setHouseholdSentInvites(invites);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [selectedHousehold?.id]);
 
   // Fetch Households with cross-session persistence and multi-query hydration
   useEffect(() => {
@@ -1036,6 +1094,85 @@ export default function App() {
     }
   };
 
+  const handleSendInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedHousehold || !user) return;
+    if (!inviteTargetInput.trim()) {
+      setInviteFormError("Please enter an email address or User ID.");
+      return;
+    }
+
+    setIsSendingInvite(true);
+    setInviteFormError(null);
+    setInviteFormSuccess(null);
+    try {
+      await sendHouseholdInvite(selectedHousehold, user, inviteTargetInput, inviteRoleInput);
+      setInviteFormSuccess(`Invitation sent to ${inviteTargetInput.trim()}!`);
+      setInviteTargetInput('');
+      setTimeout(() => setInviteFormSuccess(null), 5000);
+    } catch (err: any) {
+      console.error("Failed to send invite:", err);
+      setInviteFormError(err instanceof Error ? err.message : "Failed to send invitation.");
+    } finally {
+      setIsSendingInvite(false);
+    }
+  };
+
+  const handleCancelInvite = async (inviteId: string) => {
+    try {
+      await cancelHouseholdInvite(inviteId);
+    } catch (err) {
+      console.error("Failed to cancel invite:", err);
+      alert("Failed to cancel invitation. Please try again.");
+    }
+  };
+
+  const handleAcceptInvite = async (invite: HouseholdInvite) => {
+    if (!user || !invite.id) return;
+    setIsProcessingInviteId(invite.id);
+    try {
+      await acceptHouseholdInvite(invite, user);
+      setPlanSuccessToast(`Welcome! You joined ${invite.householdName}.`);
+      setTimeout(() => setPlanSuccessToast(null), 4000);
+    } catch (err) {
+      console.error("Failed to accept invite:", err);
+      alert("Failed to join household. Please check permissions and try again.");
+    } finally {
+      setIsProcessingInviteId(null);
+    }
+  };
+
+  const handleRejectInvite = async (invite: HouseholdInvite) => {
+    if (!invite.id) return;
+    setIsProcessingInviteId(invite.id);
+    try {
+      await rejectHouseholdInvite(invite.id);
+      setPlanSuccessToast("Invitation declined.");
+      setTimeout(() => setPlanSuccessToast(null), 3000);
+    } catch (err) {
+      console.error("Failed to reject invite:", err);
+    } finally {
+      setIsProcessingInviteId(null);
+    }
+  };
+
+  const handleLeaveHousehold = async () => {
+    if (!selectedHousehold || !user) return;
+    if (selectedHousehold.ownerId === user.uid) {
+      alert("As the owner, you cannot leave your own household. You can delete it or transfer ownership.");
+      return;
+    }
+    if (!confirm(`Are you sure you want to leave ${selectedHousehold.name}?`)) return;
+    try {
+      await removeMemberFromHousehold(selectedHousehold.id!, user.uid);
+      const remaining = households.filter(h => h.id !== selectedHousehold.id);
+      setSelectedHousehold(remaining[0] || null);
+    } catch (err) {
+      console.error("Failed to leave household:", err);
+      alert("Failed to leave household. Please try again.");
+    }
+  };
+
   const handleAddMember = async (userId: string, role: 'admin' | 'member' | 'viewer' = 'member') => {
     if (!selectedHousehold || !user || selectedHousehold.ownerId !== user.uid) return;
     try {
@@ -1065,6 +1202,14 @@ export default function App() {
       navigator.clipboard.writeText(user.uid);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handleCopyEmail = () => {
+    if (user?.email) {
+      navigator.clipboard.writeText(user.email);
+      setCopiedEmail(true);
+      setTimeout(() => setCopiedEmail(false), 2000);
     }
   };
 
@@ -1265,14 +1410,29 @@ export default function App() {
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full text-center space-y-8"
+          className="max-w-md w-full text-center space-y-6"
         >
+          {pendingInvites.length > 0 && (
+            <div className="text-left font-sans">
+              <HouseholdInvitesBanner
+                invites={pendingInvites}
+                onAccept={handleAcceptInvite}
+                onReject={handleRejectInvite}
+                isProcessingId={isProcessingInviteId}
+              />
+            </div>
+          )}
+
           <div className="w-20 h-20 bg-stone-800 rounded-3xl flex items-center justify-center mx-auto shadow-xl rotate-3">
             <Users className="w-10 h-10 text-stone-50" />
           </div>
           <div className="space-y-2">
             <h1 className="text-3xl font-bold text-stone-900 tracking-tight">Create a Household</h1>
-            <p className="text-stone-500 text-lg">You need a household to start saving recipes. A household is where you and your family share traditions.</p>
+            <p className="text-stone-500 text-lg">
+              {pendingInvites.length > 0 
+                ? "Or accept an invitation above to join an existing kitchen." 
+                : "You need a household to start saving recipes. A household is where you and your family share traditions."}
+            </p>
           </div>
           
           <form onSubmit={(e) => {
@@ -1284,15 +1444,15 @@ export default function App() {
               name="name" 
               required 
               placeholder="e.g. The Smith Family" 
-              className="w-full px-6 py-4 rounded-2xl border border-stone-200 focus:ring-2 focus:ring-stone-800/10 outline-none bg-white shadow-sm" 
+              className="w-full px-6 py-4 rounded-2xl border border-stone-200 focus:ring-2 focus:ring-stone-800/10 outline-none bg-white shadow-sm font-sans" 
               disabled={isProcessing} 
             />
-            <Button type="submit" className="w-full py-4 text-lg shadow-lg" disabled={isProcessing}>
+            <Button type="submit" className="w-full py-4 text-lg shadow-lg font-sans" disabled={isProcessing}>
               {isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" /> Creating...</> : "Create Household"}
             </Button>
           </form>
 
-          <button onClick={logOut} className="text-stone-400 hover:text-stone-600 text-sm font-medium transition-colors">
+          <button onClick={logOut} className="text-stone-400 hover:text-stone-600 text-sm font-medium transition-colors font-sans">
             Sign out
           </button>
         </motion.div>
@@ -1360,13 +1520,21 @@ export default function App() {
             <div className="relative group flex items-center shrink-0">
               <button 
                 onClick={() => setIsHouseholdModalOpen(true)}
-                className="flex items-center gap-1 sm:gap-2 px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-full bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 hover:border-stone-400 dark:hover:border-stone-600 transition-all shadow-xs shrink-0 max-w-[105px] xs:max-w-[125px] sm:max-w-[160px]"
+                className="flex items-center gap-1 sm:gap-2 px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-full bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 hover:border-stone-400 dark:hover:border-stone-600 transition-all shadow-xs shrink-0 max-w-[115px] xs:max-w-[135px] sm:max-w-[170px]"
                 title="Household settings, dietary profile, and member management"
               >
                 <Users className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-stone-400 shrink-0" />
                 <span className="font-medium text-xs sm:text-sm text-stone-700 dark:text-stone-200 truncate">
                   {selectedHousehold?.name || 'Household'}
                 </span>
+                {pendingInvites.length > 0 && (
+                  <span 
+                    className="flex items-center justify-center px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-500 text-white animate-pulse shrink-0"
+                    title={`${pendingInvites.length} pending kitchen invitation`}
+                  >
+                    {pendingInvites.length}
+                  </span>
+                )}
               </button>
             </div>
             
@@ -1412,6 +1580,14 @@ export default function App() {
       </header>
 
       <main className="max-w-7xl mx-auto px-3.5 sm:px-6 py-5 sm:py-8 space-y-6 sm:space-y-8 w-full max-w-full min-w-0">
+        {/* Pending Household Invitations Banner */}
+        <HouseholdInvitesBanner
+          invites={pendingInvites}
+          onAccept={handleAcceptInvite}
+          onReject={handleRejectInvite}
+          isProcessingId={isProcessingInviteId}
+        />
+
         {/* Toast Notification */}
         <AnimatePresence>
           {planSuccessToast && (
@@ -2009,6 +2185,56 @@ export default function App() {
       {/* Household Modal */}
       <Modal isOpen={isHouseholdModalOpen} onClose={() => setIsHouseholdModalOpen(false)} title="My Households">
         <div className="space-y-8">
+          {/* Pending Invitations to Join Kitchens */}
+          {pendingInvites.length > 0 && (
+            <div className="space-y-3 p-4 rounded-2xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30">
+              <h3 className="text-xs font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Mail className="w-4 h-4" />
+                <span>Pending Invitations ({pendingInvites.length})</span>
+              </h3>
+              <div className="space-y-2.5">
+                {pendingInvites.map((invite) => (
+                  <div 
+                    key={invite.id} 
+                    className="p-3 bg-white dark:bg-stone-900 rounded-xl border border-stone-200 dark:border-stone-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-sm"
+                  >
+                    <div>
+                      <p className="font-semibold text-stone-900 dark:text-stone-100">
+                        {invite.householdName}
+                      </p>
+                      <p className="text-xs text-stone-500 dark:text-stone-400">
+                        Invited by {invite.invitedByName || invite.invitedByEmail || 'Household Member'} as <span className="capitalize font-medium text-stone-700 dark:text-stone-300">{invite.role}</span>
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 self-end sm:self-auto">
+                      <button
+                        type="button"
+                        onClick={() => handleRejectInvite(invite)}
+                        disabled={isProcessingInviteId === invite.id}
+                        className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-stone-700 text-xs font-medium text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-800 disabled:opacity-50"
+                      >
+                        Decline
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleAcceptInvite(invite)}
+                        disabled={isProcessingInviteId === invite.id}
+                        className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold flex items-center gap-1 disabled:opacity-50"
+                      >
+                        {isProcessingInviteId === invite.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Check className="w-3.5 h-3.5" />
+                        )}
+                        <span>Join</span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="space-y-4">
             <h3 className="text-sm font-bold text-stone-400 uppercase tracking-widest">Switch Household</h3>
             <div className="grid grid-cols-1 gap-2">
@@ -2205,51 +2431,228 @@ export default function App() {
             </div>
           )}
 
-          {selectedHousehold && selectedHousehold.ownerId === user.uid && (
-            <div className="space-y-4 pt-8 border-t border-stone-200">
-              <h3 className="text-sm font-bold text-stone-400 uppercase tracking-widest">Invite Member</h3>
-              <p className="text-xs text-stone-400 italic">Enter the User ID of the person you want to invite.</p>
-              <form onSubmit={(e) => {
-                e.preventDefault();
-                const uid = new FormData(e.currentTarget).get('uid') as string;
-                handleAddMember(uid);
-                e.currentTarget.reset();
-              }} className="flex gap-2">
-                <input name="uid" required placeholder="User UID" className="flex-1 px-4 py-2 rounded-xl border border-stone-200 outline-none" />
-                <Button type="submit">Invite</Button>
-              </form>
-              <div className="space-y-2">
-                {Object.entries(selectedHousehold.members).map(([uid, role]) => (
-                  <div key={uid} className="flex justify-between items-center text-sm p-2 bg-white rounded-lg border border-stone-100">
-                    <span className="font-mono text-xs text-stone-400">{uid.slice(0, 8)}...</span>
-                    <div className="flex items-center gap-2">
-                      <span className="capitalize px-2 py-0.5 rounded-full bg-stone-100 text-stone-500 text-[10px] font-bold">{role}</span>
-                      {uid !== user.uid && (
-                        <button 
-                          onClick={() => handleRemoveMember(uid)}
-                          className="text-stone-400 hover:text-red-500 transition-colors"
-                          title="Remove member"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
+          {selectedHousehold && (
+            <div className="space-y-6 pt-8 border-t border-stone-200 dark:border-stone-800">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-stone-700 dark:text-stone-300 uppercase tracking-widest flex items-center gap-2">
+                    <Users className="w-4 h-4 text-amber-500" />
+                    <span>Kitchen Members</span>
+                  </h3>
+                  <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                    People who have access to {selectedHousehold.name}
+                  </p>
+                </div>
+                {selectedHousehold.ownerId !== user.uid && (
+                  <button
+                    type="button"
+                    onClick={handleLeaveHousehold}
+                    className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline"
+                  >
+                    Leave Kitchen
+                  </button>
+                )}
               </div>
+
+              {/* Active Members List */}
+              <div className="space-y-2">
+                {Object.entries(selectedHousehold.members || {}).map(([uid, role]) => {
+                  const isOwner = selectedHousehold.ownerId === uid;
+                  const isMe = user.uid === uid;
+                  return (
+                    <div 
+                      key={uid} 
+                      className="flex justify-between items-center text-sm p-3 bg-white dark:bg-stone-900 rounded-xl border border-stone-200 dark:border-stone-800"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-7 h-7 rounded-full bg-stone-100 dark:bg-stone-800 flex items-center justify-center text-xs font-bold text-stone-600 dark:text-stone-300">
+                          {isOwner ? '👑' : '🍳'}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-mono text-xs text-stone-700 dark:text-stone-300 truncate">
+                            {uid.slice(0, 10)}... {isMe && <span className="font-sans font-bold text-amber-600 dark:text-amber-400">(You)</span>}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="capitalize px-2.5 py-0.5 rounded-full bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300 text-[10px] font-bold">
+                          {isOwner ? 'Owner' : role}
+                        </span>
+                        {selectedHousehold.ownerId === user.uid && !isMe && (
+                          <button 
+                            type="button"
+                            onClick={() => handleRemoveMember(uid)}
+                            className="p-1 text-stone-400 hover:text-red-500 rounded-lg transition-colors"
+                            title="Remove member"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Pending Sent Invitations */}
+              {householdSentInvites.length > 0 && (
+                <div className="space-y-2.5 pt-2">
+                  <h4 className="text-xs font-bold text-stone-500 dark:text-stone-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-amber-500" />
+                    <span>Sent Invitations Awaiting Response ({householdSentInvites.length})</span>
+                  </h4>
+                  <div className="space-y-2">
+                    {householdSentInvites.map((inv) => (
+                      <div
+                        key={inv.id}
+                        className="p-3 rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/80 dark:border-amber-900/40 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-medium text-stone-800 dark:text-stone-200 truncate">
+                            {inv.inviteeEmail || inv.inviteeUid}
+                          </p>
+                          <p className="text-[11px] text-stone-500 dark:text-stone-400">
+                            Invited as <span className="capitalize font-semibold text-amber-800 dark:text-amber-300">{inv.role}</span>
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300">
+                            Pending
+                          </span>
+                          {(selectedHousehold.ownerId === user.uid || selectedHousehold.members[user.uid] === 'admin') && (
+                            <button
+                              type="button"
+                              onClick={() => handleCancelInvite(inv.id!)}
+                              className="text-stone-400 hover:text-red-500 p-1 rounded transition-colors"
+                              title="Cancel invitation"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Invite Member Form */}
+              {(selectedHousehold.ownerId === user.uid || selectedHousehold.members[user.uid] === 'admin') && (
+                <div className="space-y-3 pt-3">
+                  <div className="space-y-1">
+                    <h4 className="text-xs font-bold text-stone-700 dark:text-stone-300 uppercase tracking-widest flex items-center gap-1.5">
+                      <UserPlus className="w-4 h-4 text-amber-500" />
+                      <span>Invite Member to Kitchen</span>
+                    </h4>
+                    <p className="text-xs text-stone-500 dark:text-stone-400">
+                      Enter the recipient's Google email or User ID. They will see the invite in their app to accept or reject.
+                    </p>
+                  </div>
+
+                  {inviteFormSuccess && (
+                    <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs font-medium text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+                      <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      <span>{inviteFormSuccess}</span>
+                    </div>
+                  )}
+
+                  {inviteFormError && (
+                    <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs font-medium text-rose-800 dark:text-rose-300 flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+                      <span>{inviteFormError}</span>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSendInvite} className="space-y-2.5">
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <div className="relative flex-1">
+                        <Mail className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                        <input 
+                          value={inviteTargetInput}
+                          onChange={(e) => setInviteTargetInput(e.target.value)}
+                          required 
+                          placeholder="recipient@example.com or User UID" 
+                          className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 text-xs text-stone-900 dark:text-stone-100 outline-none focus:ring-2 focus:ring-amber-500/20" 
+                          disabled={isSendingInvite}
+                        />
+                      </div>
+
+                      <select
+                        value={inviteRoleInput}
+                        onChange={(e) => setInviteRoleInput(e.target.value as HouseholdInviteRole)}
+                        disabled={isSendingInvite}
+                        className="px-3 py-2.5 rounded-xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 text-xs font-medium text-stone-800 dark:text-stone-200 outline-none shrink-0"
+                      >
+                        <option value="member">Member (Can add recipes & plan)</option>
+                        <option value="admin">Admin (Can invite members)</option>
+                        <option value="viewer">Viewer (Read-only)</option>
+                      </select>
+
+                      <Button 
+                        type="submit" 
+                        disabled={isSendingInvite}
+                        className="py-2.5 px-4 text-xs font-semibold shrink-0"
+                      >
+                        {isSendingInvite ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Sending...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Send className="w-3.5 h-3.5" />
+                            <span>Send Invite</span>
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </form>
+                </div>
+              )}
             </div>
           )}
 
-          <div className="space-y-4 pt-8 border-t border-stone-200 dark:border-stone-800">
-            <h3 className="text-sm font-bold text-stone-400 uppercase tracking-widest">My User ID</h3>
-            <div className="flex items-center justify-between p-3 bg-stone-100 dark:bg-stone-800 rounded-xl">
-              <code className="text-xs font-mono text-stone-600 dark:text-stone-300">{user.uid}</code>
-              <button 
-                onClick={handleCopyId}
-                className="text-[10px] font-bold uppercase text-stone-400 hover:text-stone-800 dark:hover:text-stone-100 transition-colors"
-              >
-                {copied ? 'Copied!' : 'Copy'}
-              </button>
+          {/* User Profile & Connection Info */}
+          <div className="space-y-3 pt-6 border-t border-stone-200 dark:border-stone-800">
+            <div>
+              <h3 className="text-sm font-bold text-stone-400 uppercase tracking-widest">
+                My Profile & Connection Info
+              </h3>
+              <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                Share your email or User ID so others can invite you to their kitchen.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {user.email && (
+                <div className="p-3 bg-stone-100 dark:bg-stone-800/60 rounded-xl space-y-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400">My Email</span>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-stone-700 dark:text-stone-200 truncate">{user.email}</span>
+                    <button 
+                      type="button"
+                      onClick={handleCopyEmail}
+                      className="text-[10px] font-bold uppercase text-stone-400 hover:text-stone-800 dark:hover:text-stone-100 transition-colors shrink-0"
+                    >
+                      {copiedEmail ? 'Copied!' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="p-3 bg-stone-100 dark:bg-stone-800/60 rounded-xl space-y-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400">My User ID</span>
+                <div className="flex items-center justify-between gap-2">
+                  <code className="text-xs font-mono text-stone-600 dark:text-stone-300 truncate">{user.uid}</code>
+                  <button 
+                    type="button"
+                    onClick={handleCopyId}
+                    className="text-[10px] font-bold uppercase text-stone-400 hover:text-stone-800 dark:hover:text-stone-100 transition-colors shrink-0"
+                  >
+                    {copied ? 'Copied!' : 'Copy'}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
