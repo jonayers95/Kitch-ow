@@ -20,7 +20,14 @@ import { LeftoverRemixModal, PastMealItem } from './LeftoverRemixModal';
 import { BumpMissedMealsModal, MissedMealItem, WeekDayOption } from './BumpMissedMealsModal';
 import { SingleMealBumpModal } from './SingleMealBumpModal';
 import { GoogleCalendarSyncModal } from './GoogleCalendarSyncModal';
+import { CustomMealCameraInput } from './CustomMealCameraInput';
+import { MealPhotoViewModal } from './MealPhotoViewModal';
 import { evaluateFoodFreshness } from '../utils/spoilageCalculator';
+import {
+  calculateImageExpiration,
+  isCustomMealImageExpired,
+  cleanupExpiredMealSlotImages,
+} from '../utils/customMealImageUtils';
 import { 
   getStoredCalendarToken, 
   fetchWeekCalendarEvents, 
@@ -62,7 +69,8 @@ import {
   CalendarClock,
   CalendarCheck,
   Wine,
-  Zap
+  Zap,
+  Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -150,10 +158,20 @@ function sanitizeMealPlanDays(rawDays: { [dateStr: string]: MealSlot[] } | undef
         slotId = `slot_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_${idx}`;
       }
       seenSlotIds.add(slotId);
-      uniqueDaySlots.push({
+
+      // Enforce 30-day storage ceiling for custom meal photos
+      let sanitizedSlot: MealSlot = {
         ...slot,
         id: slotId,
-      });
+      };
+
+      if (slot.imageUrl && isCustomMealImageExpired(slot)) {
+        delete sanitizedSlot.imageUrl;
+        delete sanitizedSlot.imageCapturedAt;
+        delete sanitizedSlot.imageExpiresAt;
+      }
+
+      uniqueDaySlots.push(sanitizedSlot);
     });
 
     if (uniqueDaySlots.length > 0) {
@@ -189,6 +207,8 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
   const [recipeSearchQuery, setRecipeSearchQuery] = useState('');
   const [customTitle, setCustomTitle] = useState('');
   const [customNotes, setCustomNotes] = useState('');
+  const [customPhotoDataUrl, setCustomPhotoDataUrl] = useState<string | null>(null);
+  const [viewingPhotoSlot, setViewingPhotoSlot] = useState<MealSlot | null>(null);
   const [customDiningPlace, setCustomDiningPlace] = useState('');
   const [customDiningNotes, setCustomDiningNotes] = useState('');
 
@@ -404,13 +424,23 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     }
   }, [weekStartDateKey]);
 
-  // Save meal plan update
+  // Save meal plan update with instant optimistic local state
   const saveMealPlanUpdate = async (newDays: { [dateStr: string]: MealSlot[] }) => {
     if (!household?.id) return;
     const planDocId = `${household.id}_${weekStartDateKey}`;
     const planRef = doc(db, 'mealPlans', planDocId);
+    const previousDays = mealPlan?.days;
+    const sanitizedDays = cleanUndefined(sanitizeMealPlanDays(newDays));
+
+    // Optimistically update local React state immediately so UI updates with 0 latency
+    setMealPlan(prev => prev ? { ...prev, days: sanitizedDays } : {
+      householdId: household.id!,
+      weekStartDate: weekStartDateKey,
+      days: sanitizedDays,
+      authorId: currentUserId
+    });
+
     try {
-      const sanitizedDays = cleanUndefined(sanitizeMealPlanDays(newDays));
       await setDoc(planRef, {
         householdId: household.id,
         weekStartDate: weekStartDateKey,
@@ -418,15 +448,12 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
         authorId: currentUserId,
         updatedAt: serverTimestamp()
       });
-      // Optimistically update state
-      setMealPlan(prev => prev ? { ...prev, days: sanitizedDays } : {
-        householdId: household.id!,
-        weekStartDate: weekStartDateKey,
-        days: sanitizedDays,
-        authorId: currentUserId
-      });
     } catch (err) {
       console.error("Failed to save meal plan:", err);
+      // Rollback on error
+      if (previousDays) {
+        setMealPlan(prev => prev ? { ...prev, days: previousDays } : prev);
+      }
       throw err;
     }
   };
@@ -450,20 +477,16 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     setSelectedRecipeId('');
     setCustomTitle('');
     setCustomNotes('');
+    setCustomPhotoDataUrl(null);
     setCustomDiningPlace('');
     setCustomDiningNotes('');
     setActiveTab('recipe');
-    setSelectedRecipeId('');
-    setCustomTitle('');
-    setCustomNotes('');
-    setCustomDiningPlace('');
-    setCustomDiningNotes('');
     setRecipeSearchQuery('');
     setIsAddMealModalOpen(true);
   };
 
   const handleAddMealSubmit = async () => {
-    if (!selectedDateForMeal || isAddingMeal) return;
+    if (!selectedDateForMeal) return;
 
     let slot: MealSlot;
     if (activeTab === 'recipe') {
@@ -487,11 +510,23 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
       };
     } else {
       if (!customTitle.trim()) return;
+
+      let imageProps: Partial<MealSlot> = {};
+      if (customPhotoDataUrl) {
+        const { imageCapturedAt, imageExpiresAt } = calculateImageExpiration();
+        imageProps = {
+          imageUrl: customPhotoDataUrl,
+          imageCapturedAt,
+          imageExpiresAt,
+        };
+      }
+
       slot = {
         id: 'slot_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
         mealType: selectedMealType,
         customTitle: customTitle.trim(),
         ...(customNotes.trim() ? { notes: customNotes.trim() } : {}),
+        ...imageProps,
         isDone: false
       };
     }
@@ -501,22 +536,22 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     daySlots.push(slot);
     currentDays[selectedDateForMeal] = daySlots;
 
-    setIsAddingMeal(true);
+    // Immediately close the modal and reset input states for instantaneous feedback
+    setIsAddMealModalOpen(false);
+    setSelectedRecipeId('');
+    setCustomTitle('');
+    setCustomNotes('');
+    setCustomPhotoDataUrl(null);
+    setCustomDiningPlace('');
+    setCustomDiningNotes('');
+
+    // Persist changes in the background while state is already optimistically updated
     try {
       await saveMealPlanUpdate(currentDays);
-      // Close the modal once the meal has been added
-      setIsAddMealModalOpen(false);
-      setSelectedRecipeId('');
-      setCustomTitle('');
-      setCustomNotes('');
-      setCustomDiningPlace('');
-      setCustomDiningNotes('');
     } catch (err) {
-      console.error("Error adding meal:", err);
-      // Ensure modal is closed if optimistic update occurred
-      setIsAddMealModalOpen(false);
-    } finally {
-      setIsAddingMeal(false);
+      console.error("Error saving meal plan:", err);
+      setSwapFeedbackToast("Could not save meal. Please check your connection.");
+      setTimeout(() => setSwapFeedbackToast(null), 4000);
     }
   };
 
@@ -1582,6 +1617,28 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                           </div>
                         ) : (
                           <div className="space-y-1">
+                            {/* Custom Meal Camera Photo (Enforces 30-day retention) */}
+                            {slot.imageUrl && !isCustomMealImageExpired(slot) && (
+                              <div
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => setViewingPhotoSlot(slot)}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setViewingPhotoSlot(slot); }}
+                                className="relative mb-2 rounded-xl overflow-hidden bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 aspect-16/10 cursor-pointer group/photo shadow-xs"
+                                title="Click to view full photo and retention info"
+                              >
+                                <img
+                                  src={slot.imageUrl}
+                                  alt={slot.customTitle || 'Custom Meal'}
+                                  className="w-full h-full object-cover group-hover/photo:scale-105 transition-transform duration-200"
+                                />
+                                <div className="absolute top-1 right-1 px-1.5 py-0.5 rounded-full bg-black/60 backdrop-blur-xs text-[9px] font-semibold text-white flex items-center gap-0.5">
+                                  <Camera className="w-2.5 h-2.5 text-amber-400" />
+                                  <span>Photo</span>
+                                </div>
+                              </div>
+                            )}
+
                             <h4 className={cn(
                               "font-serif font-bold text-xs leading-snug text-stone-900 dark:text-stone-100",
                               slot.isDone && "line-through text-stone-400 dark:text-stone-500"
@@ -1893,6 +1950,14 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                         value={customNotes}
                         onChange={(e) => setCustomNotes(e.target.value)}
                         className="w-full px-3 py-2 rounded-xl text-sm border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                      />
+                    </div>
+
+                    {/* Camera Photo Input (30-day retention) */}
+                    <div className="pt-1">
+                      <CustomMealCameraInput
+                        photoDataUrl={customPhotoDataUrl}
+                        onPhotoChange={setCustomPhotoDataUrl}
                       />
                     </div>
                   </div>
@@ -2243,6 +2308,13 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
               .catch(console.warn);
           }
         }}
+      />
+
+      {/* Custom Meal Photo View Modal */}
+      <MealPhotoViewModal
+        isOpen={!!viewingPhotoSlot}
+        onClose={() => setViewingPhotoSlot(null)}
+        slot={viewingPhotoSlot}
       />
 
       {/* Feedback Toast */}

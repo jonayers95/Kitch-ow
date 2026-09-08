@@ -598,6 +598,117 @@ async function startServer() {
     res.json({ clientId });
   });
 
+  // Bug & Feature Request Reporting Endpoint
+  // Forwarded to AyersAIDev@gmail.com without consuming any Gemini AI tokens/credits.
+  app.post("/api/feedback", async (req, res) => {
+    try {
+      const {
+        type = "bug",
+        title,
+        description,
+        severity,
+        reproductionSteps,
+        userEmail,
+        userId,
+        householdId,
+        householdName,
+        appUrl,
+        userAgent,
+        screenSize,
+        timestamp = new Date().toISOString(),
+      } = req.body || {};
+
+      if (!title || typeof title !== "string" || !title.trim()) {
+        return res.status(400).json({ error: "Title is required for feedback or bug reports." });
+      }
+
+      if (!description || typeof description !== "string" || !description.trim()) {
+        return res.status(400).json({ error: "Description is required for feedback or bug reports." });
+      }
+
+      const targetEmail = "AyersAIDev@gmail.com";
+      const reportId = `rep_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+      let subjectPrefix = "[FEEDBACK]";
+      if (type === "bug") {
+        const sev = (severity || "normal").toUpperCase();
+        subjectPrefix = `[BUG - ${sev}]`;
+      } else if (type === "feature") {
+        subjectPrefix = "[FEATURE REQUEST]";
+      }
+      const emailSubject = `${subjectPrefix} ${title.trim()}`;
+
+      const textBody = [
+        `=== MEAL PLANNER ${type === "bug" ? "BUG REPORT" : type === "feature" ? "FEATURE REQUEST" : "FEEDBACK"} ===`,
+        `Report ID: ${reportId}`,
+        `Submitted: ${timestamp}`,
+        `Type: ${type.toUpperCase()}`,
+        `Title: ${title.trim()}`,
+        severity ? `Severity: ${severity}` : null,
+        `Reporter: ${userEmail || "Anonymous / Not specified"} (UID: ${userId || "None"})`,
+        householdName || householdId ? `Household: ${householdName || "Unnamed"} (${householdId || "None"})` : null,
+        ``,
+        `--- Description ---`,
+        description.trim(),
+        reproductionSteps ? `\n--- Steps to Reproduce ---\n${reproductionSteps.trim()}` : null,
+        ``,
+        `--- Diagnostics ---`,
+        `App URL: ${appUrl || "Unknown"}`,
+        `Client Agent: ${userAgent || "Unknown"}`,
+        `Screen: ${screenSize || "Unknown"}`,
+        `AI Usage: ZERO AI tokens / credits consumed.`,
+      ].filter(Boolean).join("\n");
+
+      console.log(`\n======================================================`);
+      console.log(`[FEEDBACK / BUG REPORT FORWARDED TO ${targetEmail}]`);
+      console.log(`Subject: ${emailSubject}`);
+      console.log(textBody);
+      console.log(`======================================================\n`);
+
+      // If SMTP credentials are configured, send outbound email
+      let emailSent = false;
+      const smtpHost = process.env.SMTP_HOST;
+      const smtpUser = process.env.SMTP_USER || process.env.GMAIL_USER;
+      const smtpPass = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD;
+
+      if (smtpHost && smtpUser && smtpPass) {
+        try {
+          const nodemailer = await import("nodemailer");
+          const transporter = nodemailer.createTransport({
+            host: smtpHost,
+            port: Number(process.env.SMTP_PORT) || 587,
+            secure: process.env.SMTP_SECURE === "true",
+            auth: { user: smtpUser, pass: smtpPass },
+          });
+
+          await transporter.sendMail({
+            from: `"${userEmail ? userEmail.split('@')[0] : 'Meal Planner User'}" <${smtpUser}>`,
+            to: targetEmail,
+            replyTo: userEmail || undefined,
+            subject: emailSubject,
+            text: textBody,
+          });
+          emailSent = true;
+          console.log(`[Feedback] Successfully emailed report to ${targetEmail} via SMTP`);
+        } catch (mailErr: any) {
+          console.warn(`[Feedback] SMTP dispatch notice: ${mailErr?.message || mailErr}`);
+        }
+      }
+
+      res.json({
+        success: true,
+        message: `Report received and routed to ${targetEmail}`,
+        reportId,
+        targetEmail,
+        emailSent,
+        timestamp,
+      });
+    } catch (err: any) {
+      console.error("[Feedback] Error processing report:", err);
+      res.status(500).json({ error: "Failed to process feedback report." });
+    }
+  });
+
   // Extract Recipe from URL
   app.post("/api/gemini/extract-url", async (req, res) => {
     try {

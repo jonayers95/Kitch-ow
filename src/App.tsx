@@ -64,6 +64,7 @@ import { LeftoverRemixModal, PastMealItem } from './components/LeftoverRemixModa
 import { KitchenDietaryProfileModal } from './components/KitchenDietaryProfileModal';
 import { RecipeJsonModal } from './components/RecipeJsonModal';
 import { StarterPackModal } from './components/StarterPackModal';
+import { FeedbackModal } from './components/FeedbackModal';
 import { 
   Plus, 
   Search, 
@@ -100,7 +101,8 @@ import {
   Mail,
   Check,
   Send,
-  UserPlus
+  UserPlus,
+  Bug
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -395,6 +397,9 @@ export default function App() {
 
   // Recipe JSON Import/Export State
   const [isJsonModalOpen, setIsJsonModalOpen] = useState(false);
+  
+  // Bug & Feature Reporting Modal State (Zero AI Tokens)
+  const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
 
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [isDeleteHouseholdConfirmOpen, setIsDeleteHouseholdConfirmOpen] = useState(false);
@@ -1215,6 +1220,14 @@ export default function App() {
 
   const handleAddRecipeToMealPlan = async () => {
     if (!planningRecipe || !selectedHousehold?.id || !user) return;
+    const recipeTitle = planningRecipe.title;
+    const targetRecipeId = planningRecipe.id;
+
+    // Immediately close modal and notify user so the action feels instantaneous
+    setPlanningRecipe(null);
+    setPlanSuccessToast(`Added "${recipeTitle}" to meal plan!`);
+    setTimeout(() => setPlanSuccessToast(null), 3000);
+
     setIsPlanSaving(true);
     try {
       const selectedDate = new Date(targetPlanDate + 'T00:00:00');
@@ -1242,15 +1255,10 @@ export default function App() {
       daySlots.push({
         id: 'slot_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
         mealType: targetMealType,
-        recipeId: planningRecipe.id,
+        recipeId: targetRecipeId,
         isDone: false
       });
       currentDays[targetPlanDate] = daySlots;
-
-      const recipeTitle = planningRecipe.title;
-      setPlanningRecipe(null);
-      setPlanSuccessToast(`Added "${recipeTitle}" to meal plan!`);
-      setTimeout(() => setPlanSuccessToast(null), 3000);
 
       await setDoc(planRef, {
         householdId: selectedHousehold.id,
@@ -1507,7 +1515,19 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-1 sm:gap-3 shrink-0">
+          <div className="flex items-center gap-1 sm:gap-2.5 shrink-0">
+            {/* Bug & Feature Report Button (Zero AI Tokens) */}
+            <button
+              id="header-feedback-btn"
+              type="button"
+              onClick={() => setIsFeedbackModalOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-full bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 hover:border-amber-400 dark:hover:border-amber-500 hover:text-amber-600 dark:hover:text-amber-400 text-stone-600 dark:text-stone-400 transition-all shadow-xs text-xs font-semibold shrink-0"
+              title="Report a bug or submit a feature request to AyersAIDev@gmail.com (Zero AI tokens consumed)"
+            >
+              <Bug className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-rose-500 shrink-0" />
+              <span className="hidden md:inline text-[11px] font-bold">Feedback</span>
+            </button>
+
             <button 
               type="button"
               onClick={() => setIsDarkMode(prev => !prev)}
@@ -2656,6 +2676,29 @@ export default function App() {
             </div>
           </div>
 
+          {/* Feedback & Bug Reporting in Household Settings */}
+          <div className="pt-6 border-t border-stone-200 dark:border-stone-800 flex items-center justify-between gap-3 p-3.5 bg-stone-50 dark:bg-stone-800/40 rounded-2xl">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="p-2 rounded-xl bg-rose-500/10 text-rose-500 shrink-0">
+                <Bug className="w-4 h-4" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-stone-800 dark:text-stone-200 truncate">Found an issue or have an idea?</p>
+                <p className="text-[11px] text-stone-400 truncate">Sent to AyersAIDev@gmail.com (0 AI credits used)</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setIsHouseholdModalOpen(false);
+                setIsFeedbackModalOpen(true);
+              }}
+              className="text-xs font-semibold px-3 py-1.5 rounded-xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-800 text-stone-700 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-700 transition-colors shrink-0"
+            >
+              Report / Request
+            </button>
+          </div>
+
           <div className="space-y-4 pt-8 border-t border-stone-200 dark:border-stone-800">
             <h3 className="text-sm font-bold text-stone-400 uppercase tracking-widest">Create New Household</h3>
             <form onSubmit={(e) => {
@@ -2824,6 +2867,14 @@ export default function App() {
         onForceReloadAll={handleForceReloadStockRecipes}
         onAddSingleRecipe={handleSeedSingleStockRecipe}
         onViewRecipe={(recipe) => setViewingRecipe(recipe)}
+      />
+
+      {/* Bug & Feature Request Reporting Modal (Direct to AyersAIDev@gmail.com - 0 AI tokens) */}
+      <FeedbackModal
+        isOpen={isFeedbackModalOpen}
+        onClose={() => setIsFeedbackModalOpen(false)}
+        currentUser={user}
+        household={selectedHousehold}
       />
     </div>
     </ErrorBoundary>

@@ -120,14 +120,17 @@ export const SurpriseMeModal: React.FC<SurpriseMeModalProps> = ({
   const handleScheduleMeal = async () => {
     if (!pickedRecipe) return;
     setIsAddingToPlan(true);
+    // Provide instant feedback immediately upon button press
+    setPlanAddedSuccess(true);
+    setTimeout(() => {
+      setPlanAddedSuccess(false);
+    }, 3000);
+
     try {
       await onAddToMealPlan(pickedRecipe, planDate, planMealType);
-      setPlanAddedSuccess(true);
-      setTimeout(() => {
-        setPlanAddedSuccess(false);
-      }, 3000);
     } catch (err) {
       console.error("Failed to add to meal plan:", err);
+      setPlanAddedSuccess(false);
     } finally {
       setIsAddingToPlan(false);
     }

@@ -14,6 +14,9 @@ export interface MealSlot {
   diningOutPlace?: string;
   calendarEventId?: string;
   calendarEventSummary?: string;
+  imageUrl?: string;
+  imageCapturedAt?: string;
+  imageExpiresAt?: string;
 }
 
 export interface GoogleCalendarListItem {
@@ -151,6 +154,27 @@ export interface HouseholdInvite {
   status: HouseholdInviteStatus;
   createdAt?: Timestamp | any;
   updatedAt?: Timestamp | any;
+}
+
+export type ReportType = 'bug' | 'feature' | 'feedback';
+export type ReportSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface FeedbackReport {
+  id?: string;
+  type: ReportType;
+  title: string;
+  description: string;
+  severity?: ReportSeverity;
+  reproductionSteps?: string;
+  userEmail?: string;
+  userId?: string;
+  householdId?: string;
+  householdName?: string;
+  appUrl?: string;
+  userAgent?: string;
+  screenSize?: string;
+  timestamp?: string;
+  status?: 'new' | 'in-review' | 'resolved';
 }
 
 declare global {
