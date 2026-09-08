@@ -34,6 +34,12 @@ import {
   CalendarAuthStatus 
 } from '../services/calendarService';
 import { WeekCalendarInsights } from '../types';
+import {
+  saveMealPlan,
+  subscribeToWeeklyMealPlan,
+  sanitizeAndPruneMealPlanDays,
+  getCachedMealPlan
+} from '../services/mealPlanService';
 import { 
   addDoc, 
   collection, 
@@ -189,9 +195,31 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
   onViewRecipe,
   onRequestAddRecipe
 }) => {
-  // Current active Monday
-  const [currentMonday, setCurrentMonday] = useState<Date>(() => getMonday(new Date()));
-  const [mealPlan, setMealPlan] = useState<MealPlan | null>(null);
+  // Current active Monday with cross-session memory
+  const [currentMonday, setCurrentMonday] = useState<Date>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem(`kitchow_active_week_${household?.id || 'default'}`);
+        if (saved) {
+          const parts = saved.split('-').map(Number);
+          if (parts.length === 3 && !isNaN(parts[0]) && !isNaN(parts[1]) && !isNaN(parts[2])) {
+            return getMonday(new Date(parts[0], parts[1] - 1, parts[2]));
+          }
+        }
+      } catch {
+        // Ignore
+      }
+    }
+    return getMonday(new Date());
+  });
+
+  const [mealPlan, setMealPlan] = useState<MealPlan | null>(() => {
+    if (household?.id) {
+      const initialWeekKey = formatDateKey(getMonday(new Date()));
+      return getCachedMealPlan(household.id, initialWeekKey);
+    }
+    return null;
+  });
   const [loading, setLoading] = useState(true);
 
   // Modal states
@@ -351,7 +379,18 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     return `${startStr} – ${endStr}`;
   }, [currentMonday]);
 
-  // Subscribe to Meal Plan in Firestore
+  // Keep active week remembered across refreshes
+  useEffect(() => {
+    if (household?.id && weekStartDateKey) {
+      try {
+        localStorage.setItem(`kitchow_active_week_${household.id}`, weekStartDateKey);
+      } catch {
+        // Ignore
+      }
+    }
+  }, [household?.id, weekStartDateKey]);
+
+  // Subscribe to Meal Plan with instant cache hydration and real-time Firestore sync
   useEffect(() => {
     if (!household?.id) {
       setMealPlan(null);
@@ -360,34 +399,19 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     }
 
     setLoading(true);
-    const planDocId = `${household.id}_${weekStartDateKey}`;
-    const planRef = doc(db, 'mealPlans', planDocId);
-
-    const unsubscribe = onSnapshot(planRef, (snapshot) => {
-      if (snapshot.exists()) {
-        const data = snapshot.data();
-        const rawDays = data.days || {};
-        const sanitizedDays = sanitizeMealPlanDays(rawDays);
-        setMealPlan({ id: snapshot.id, ...data, days: sanitizedDays } as MealPlan);
-      } else {
-        setMealPlan({
-          householdId: household.id!,
-          weekStartDate: weekStartDateKey,
-          days: {},
-          authorId: currentUserId
-        });
+    const unsubscribe = subscribeToWeeklyMealPlan(
+      household.id,
+      weekStartDateKey,
+      currentUserId,
+      (updatedPlan) => {
+        setMealPlan(updatedPlan);
+        setLoading(false);
+      },
+      (error) => {
+        console.warn("Meal plan sync notice:", error);
+        setLoading(false);
       }
-      setLoading(false);
-    }, (error) => {
-      console.warn("Meal plan sync notice:", error);
-      setMealPlan({
-        householdId: household.id!,
-        weekStartDate: weekStartDateKey,
-        days: {},
-        authorId: currentUserId
-      });
-      setLoading(false);
-    });
+    );
 
     return () => unsubscribe();
   }, [household?.id, weekStartDateKey, currentUserId]);
@@ -424,13 +448,11 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     }
   }, [weekStartDateKey]);
 
-  // Save meal plan update with instant optimistic local state
+  // Save meal plan update with instant optimistic local state and durable persistence
   const saveMealPlanUpdate = async (newDays: { [dateStr: string]: MealSlot[] }) => {
     if (!household?.id) return;
-    const planDocId = `${household.id}_${weekStartDateKey}`;
-    const planRef = doc(db, 'mealPlans', planDocId);
     const previousDays = mealPlan?.days;
-    const sanitizedDays = cleanUndefined(sanitizeMealPlanDays(newDays));
+    const sanitizedDays = cleanUndefined(sanitizeAndPruneMealPlanDays(newDays));
 
     // Optimistically update local React state immediately so UI updates with 0 latency
     setMealPlan(prev => prev ? { ...prev, days: sanitizedDays } : {
@@ -441,13 +463,12 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     });
 
     try {
-      await setDoc(planRef, {
-        householdId: household.id,
-        weekStartDate: weekStartDateKey,
-        days: sanitizedDays,
-        authorId: currentUserId,
-        updatedAt: serverTimestamp()
-      });
+      await saveMealPlan(
+        household.id,
+        weekStartDateKey,
+        newDays,
+        currentUserId
+      );
     } catch (err) {
       console.error("Failed to save meal plan:", err);
       // Rollback on error
@@ -800,13 +821,16 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
       });
       currentDays[dateStr] = daySlots;
 
-      await setDoc(planRef, {
-        householdId: household.id,
-        weekStartDate: targetWeekStartDateKey,
-        days: cleanUndefined(currentDays),
-        authorId: currentUserId,
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
+      await saveMealPlan(
+        household.id,
+        targetWeekStartDateKey,
+        currentDays,
+        currentUserId
+      );
+
+      if (targetWeekStartDateKey === weekStartDateKey) {
+        setMealPlan((prev) => (prev ? { ...prev, days: currentDays } : null));
+      }
 
       setSwapFeedbackToast(`Scheduled "${title}" on your meal plan for ${dateStr}!`);
       setTimeout(() => setSwapFeedbackToast(null), 3500);
@@ -882,13 +906,12 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
         sourceDays[sourceDateKey] = sourceSlots;
       }
 
-      await setDoc(sourcePlanRef, {
-        householdId: household.id,
-        weekStartDate: sourceWeekKey,
-        days: cleanUndefined(sourceDays),
-        authorId: currentUserId,
-        updatedAt: serverTimestamp(),
-      });
+      await saveMealPlan(
+        household.id,
+        sourceWeekKey,
+        sourceDays,
+        currentUserId
+      );
 
       if (sourceWeekKey === weekStartDateKey) {
         setMealPlan((prev) => (prev ? { ...prev, days: sourceDays } : null));
@@ -913,13 +936,12 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
       targetSlots.push(updatedSlot);
       targetDays[targetDateKey] = targetSlots;
 
-      await setDoc(targetPlanRef, {
-        householdId: household.id,
-        weekStartDate: targetWeekKey,
-        days: cleanUndefined(targetDays),
-        authorId: currentUserId,
-        updatedAt: serverTimestamp(),
-      });
+      await saveMealPlan(
+        household.id,
+        targetWeekKey,
+        targetDays,
+        currentUserId
+      );
 
       if (targetWeekKey === weekStartDateKey) {
         setMealPlan((prev) => (prev ? { ...prev, days: targetDays } : null));
@@ -986,16 +1008,13 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
 
     // Save all affected weeks cleanly
     for (const wKey of affectedWeeks) {
-      const planDocId = `${household.id}_${wKey}`;
-      const planRef = doc(db, 'mealPlans', planDocId);
       const sanitizedDays = cleanUndefined(weekDataMap[wKey]);
-      await setDoc(planRef, {
-        householdId: household.id,
-        weekStartDate: wKey,
-        days: sanitizedDays,
-        authorId: currentUserId,
-        updatedAt: serverTimestamp(),
-      });
+      await saveMealPlan(
+        household.id,
+        wKey,
+        sanitizedDays,
+        currentUserId
+      );
       if (wKey === weekStartDateKey) {
         setMealPlan((prev) => (prev ? { ...prev, days: sanitizedDays } : null));
       }

@@ -57,6 +57,11 @@ import {
   subscribeToHouseholdPendingInvites
 } from './services/householdInviteService';
 import { HouseholdInvitesBanner } from './components/HouseholdInvitesBanner';
+import {
+  saveMealPlan,
+  getCachedMealPlan,
+  setCachedMealPlan
+} from './services/mealPlanService';
 import { STOCK_RECIPES } from './data/stockRecipes';
 import { WeeklyMealPlan } from './components/WeeklyMealPlan';
 import { SurpriseMeModal } from './components/SurpriseMeModal';
