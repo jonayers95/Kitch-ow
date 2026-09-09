@@ -16,8 +16,9 @@ import {
 } from 'firebase/firestore';
 import { User } from 'firebase/auth';
 import { db } from '../firebase';
-import { Household, Category } from '../types';
+import { Household, Category, Recipe } from '../types';
 import { STOCK_RECIPES } from '../data/stockRecipes';
+import { setCachedRecipes } from './recipeService';
 
 const ACTIVE_HOUSEHOLD_PREFIX = 'kitchow_active_household_';
 const CACHED_HOUSEHOLDS_PREFIX = 'kitchow_cached_households_';
@@ -108,7 +109,9 @@ export async function createHouseholdWithStarterPack(
   // Batch add starter recipes
   try {
     const batch = writeBatch(db);
+    const cachedSeedList: Recipe[] = [];
     for (const recipe of STOCK_RECIPES) {
+      const rRef = doc(collection(db, 'recipes'));
       const cleanedRecipe = {
         title: recipe.title?.trim() || "Untitled Recipe",
         category: (recipe.category as Category) || "Other",
@@ -124,9 +127,14 @@ export async function createHouseholdWithStarterPack(
         householdId: docRef.id,
         createdAt: serverTimestamp(),
       };
-      const rRef = doc(collection(db, 'recipes'));
+      cachedSeedList.push({
+        ...cleanedRecipe,
+        id: rRef.id,
+        createdAt: { toMillis: () => Date.now() } as any
+      });
       batch.set(rRef, cleanedRecipe);
     }
+    setCachedRecipes(docRef.id, cachedSeedList);
     await batch.commit();
   } catch (seedErr) {
     console.warn("Starter recipes auto-population notice:", seedErr);

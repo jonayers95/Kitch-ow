@@ -62,6 +62,14 @@ import {
   getCachedMealPlan,
   setCachedMealPlan
 } from './services/mealPlanService';
+import {
+  saveRecipe,
+  deleteRecipe,
+  toggleRecipeStaple,
+  saveStockRecipes,
+  subscribeToRecipes,
+  getCachedRecipes
+} from './services/recipeService';
 import { STOCK_RECIPES } from './data/stockRecipes';
 import { WeeklyMealPlan } from './components/WeeklyMealPlan';
 import { SurpriseMeModal } from './components/SurpriseMeModal';
@@ -346,7 +354,15 @@ export default function App() {
   }, [isDarkMode]);
 
   const [selectedHousehold, setSelectedHousehold] = useState<Household | null>(null);
-  const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [recipes, setRecipes] = useState<Recipe[]>(() => {
+    if (typeof window !== 'undefined') {
+      const activeHId = localStorage.getItem('kitchow_active_household_id') || '';
+      if (activeHId) {
+        return getCachedRecipes(activeHId);
+      }
+    }
+    return [];
+  });
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<Category | 'All' | 'Staples'>('All');
   const [currentTab, setCurrentTab] = useState<'recipes' | 'mealPlan'>('recipes');
@@ -543,27 +559,27 @@ export default function App() {
     }
   }, [user, selectedHousehold?.id]);
 
-  // Fetch Recipes
+  // Fetch & Subscribe to Recipes with instant local cache hydration
   useEffect(() => {
-    if (!user || !selectedHousehold) {
+    const householdId = selectedHousehold?.id || (typeof window !== 'undefined' ? (user ? getPersistedActiveHouseholdId(user.uid) : localStorage.getItem('kitchow_active_household_id')) : '');
+    if (!householdId) {
       setRecipes([]);
       return;
     }
-    const q = query(collection(db, 'recipes'), where('householdId', '==', selectedHousehold.id));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetchedRecipes = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Recipe));
-      fetchedRecipes.sort((a, b) => {
-        const timeA = a.createdAt?.toMillis?.() || Date.now();
-        const timeB = b.createdAt?.toMillis?.() || Date.now();
-        return timeB - timeA;
-      });
-      setRecipes(fetchedRecipes);
-    }, (error) => {
-      console.warn('Recipe listener notice:', error);
-      handleFirestoreError(error, OperationType.LIST, 'recipes');
-    });
+
+    const unsubscribe = subscribeToRecipes(
+      householdId,
+      (fetchedRecipes) => {
+        setRecipes(fetchedRecipes);
+      },
+      (error) => {
+        console.warn('Recipe listener notice:', error);
+        handleFirestoreError(error, OperationType.LIST, 'recipes');
+      }
+    );
+
     return () => unsubscribe();
-  }, [user, selectedHousehold]);
+  }, [user, selectedHousehold?.id]);
 
   // Fetch past cooked meals across all meal plans for Leftover Remix Engine
   useEffect(() => {
@@ -626,14 +642,16 @@ export default function App() {
   }) => {
     if (!user || !selectedHousehold) return;
     try {
-      await addDoc(collection(db, 'recipes'), {
-        ...recipeData,
-        authorId: user.uid,
-        householdId: selectedHousehold.id,
-        createdAt: serverTimestamp(),
-        rating: 0,
-        isStaple: false,
-      });
+      const saved = await saveRecipe(
+        {
+          ...recipeData,
+          rating: 0,
+          isStaple: false
+        },
+        user,
+        selectedHousehold.id
+      );
+      setRecipes(prev => [saved, ...prev.filter(r => r.id !== saved.id)]);
       setPlanSuccessToast(`Saved "${recipeData.title}" to your recipe book!`);
       setTimeout(() => setPlanSuccessToast(null), 3500);
     } catch (err) {
@@ -803,39 +821,17 @@ export default function App() {
         return 0;
       }
 
-      // Write in a single atomic batch
-      const batch = writeBatch(db);
-      for (const recipe of missingRecipes) {
-        const cleanedRecipe = {
-          title: recipe.title?.trim() || "Untitled Recipe",
-          category: (recipe.category as Category) || "Other",
-          rating: recipe.rating || 5,
-          estimatedTime: recipe.estimatedTime || 30,
-          sourceUrl: recipe.sourceUrl || "",
-          imageUrl: recipe.imageUrl || "",
-          ingredients: Array.isArray(recipe.ingredients) ? recipe.ingredients : [],
-          instructions: Array.isArray(recipe.instructions) ? recipe.instructions : [],
-          isStock: true,
-          isStaple: !!recipe.isStaple,
-          authorId: user.uid,
-          householdId: targetHousehold.id,
-          createdAt: serverTimestamp(),
-        };
-
-        const newDocRef = doc(collection(db, 'recipes'));
-        batch.set(newDocRef, cleanedRecipe);
-      }
-
-      await batch.commit();
+      const addedCount = await saveStockRecipes(missingRecipes, user, targetHousehold.id);
+      setRecipes(getCachedRecipes(targetHousehold.id));
 
       setDismissedStarterBanner(true);
       if (typeof window !== 'undefined') {
         localStorage.setItem('dismissed_starter_recipes_banner', 'true');
       }
 
-      setPlanSuccessToast(`Added ${missingRecipes.length} starter recipes to ${targetHousehold.name}!`);
+      setPlanSuccessToast(`Added ${addedCount} starter recipes to ${targetHousehold.name}!`);
       setTimeout(() => setPlanSuccessToast(null), 4000);
-      return missingRecipes.length;
+      return addedCount;
     } catch (error) {
       console.error("Error seeding stock recipes:", error);
       const errMsg = error instanceof Error ? error.message : "Network error";
@@ -853,34 +849,15 @@ export default function App() {
 
     setIsProcessing(true);
     try {
-      const batch = writeBatch(db);
-      for (const recipe of STOCK_RECIPES) {
-        const cleanedRecipe = {
-          title: recipe.title?.trim() || "Untitled Recipe",
-          category: (recipe.category as Category) || "Other",
-          rating: recipe.rating || 5,
-          estimatedTime: recipe.estimatedTime || 30,
-          sourceUrl: recipe.sourceUrl || "",
-          imageUrl: recipe.imageUrl || "",
-          ingredients: Array.isArray(recipe.ingredients) ? recipe.ingredients : [],
-          instructions: Array.isArray(recipe.instructions) ? recipe.instructions : [],
-          isStock: true,
-          isStaple: !!recipe.isStaple,
-          authorId: user.uid,
-          householdId: targetHousehold.id,
-          createdAt: serverTimestamp(),
-        };
-        const newDocRef = doc(collection(db, 'recipes'));
-        batch.set(newDocRef, cleanedRecipe);
-      }
-      await batch.commit();
+      const addedCount = await saveStockRecipes(STOCK_RECIPES, user, targetHousehold.id);
+      setRecipes(getCachedRecipes(targetHousehold.id));
       setDismissedStarterBanner(true);
       if (typeof window !== 'undefined') {
         localStorage.setItem('dismissed_starter_recipes_banner', 'true');
       }
       setPlanSuccessToast(`All 32 starter recipes loaded into ${targetHousehold.name}!`);
       setTimeout(() => setPlanSuccessToast(null), 3500);
-      return 32;
+      return addedCount;
     } catch (err) {
       console.error("Error force reloading recipes:", err);
       throw err;
@@ -894,23 +871,16 @@ export default function App() {
     const targetHousehold = selectedHousehold || households[0];
     if (!targetHousehold?.id) throw new Error("No household found.");
 
-    const cleanedRecipe = {
-      title: stockRecipe.title?.trim() || "Untitled Recipe",
-      category: (stockRecipe.category as Category) || "Other",
-      rating: stockRecipe.rating || 5,
-      estimatedTime: stockRecipe.estimatedTime || 30,
-      sourceUrl: stockRecipe.sourceUrl || "",
-      imageUrl: stockRecipe.imageUrl || "",
-      ingredients: Array.isArray(stockRecipe.ingredients) ? stockRecipe.ingredients : [],
-      instructions: Array.isArray(stockRecipe.instructions) ? stockRecipe.instructions : [],
-      isStock: true,
-      isStaple: !!stockRecipe.isStaple,
-      authorId: user.uid,
-      householdId: targetHousehold.id,
-      createdAt: serverTimestamp(),
-    };
+    const saved = await saveRecipe(
+      {
+        ...stockRecipe,
+        isStock: true
+      },
+      user,
+      targetHousehold.id
+    );
 
-    await addDoc(collection(db, 'recipes'), cleanedRecipe);
+    setRecipes(prev => [saved, ...prev.filter(r => r.id !== saved.id)]);
   };
 
   const handleDeleteHousehold = async (householdId: string) => {
@@ -1019,38 +989,46 @@ export default function App() {
 
     setRecipeFormError(null);
 
-    // Remove undefined fields to prevent Firestore errors
-    const cleanedData = Object.fromEntries(
-      Object.entries(recipeData).filter(([_, v]) => v !== undefined)
-    );
-
     try {
-      if (editingRecipe?.id) {
-        await updateDoc(doc(db, 'recipes', editingRecipe.id), {
-          ...cleanedData,
-          updatedAt: serverTimestamp()
-        });
-      } else {
-        await addDoc(collection(db, 'recipes'), {
-          ...cleanedData,
-          authorId: user.uid,
-          householdId: selectedHousehold.id,
-          createdAt: serverTimestamp(),
-          rating: cleanedData.rating || 0
-        });
-      }
+      const payload: Partial<Recipe> = {
+        ...recipeData,
+        id: editingRecipe?.id || undefined,
+        authorId: editingRecipe?.authorId || user.uid,
+        householdId: selectedHousehold.id,
+      };
+
+      const saved = await saveRecipe(payload, user, selectedHousehold.id);
+
+      // Optimistically update recipes state
+      setRecipes(prev => {
+        const existingIdx = prev.findIndex(r => r.id === saved.id);
+        if (existingIdx >= 0) {
+          const next = [...prev];
+          next[existingIdx] = saved;
+          return next;
+        }
+        return [saved, ...prev];
+      });
+
+      setPlanSuccessToast(editingRecipe?.id ? `Updated "${saved.title}"!` : `Added "${saved.title}" to recipes!`);
+      setTimeout(() => setPlanSuccessToast(null), 3500);
       setIsAddModalOpen(false);
       setEditingRecipe(null);
     } catch (error) {
       console.error("Error saving recipe:", error);
+      setRecipeFormError(error instanceof Error ? error.message : "Failed to save recipe.");
     }
   };
 
   const handleDeleteRecipe = async (id: string) => {
+    if (!selectedHousehold?.id) return;
     try {
-      await deleteDoc(doc(db, 'recipes', id));
+      await deleteRecipe(id, selectedHousehold.id);
+      setRecipes(prev => prev.filter(r => r.id !== id));
       setViewingRecipe(null);
       setIsDeleteConfirmOpen(false);
+      setPlanSuccessToast("Recipe deleted.");
+      setTimeout(() => setPlanSuccessToast(null), 3000);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `recipes/${id}`);
     }
@@ -1282,13 +1260,10 @@ export default function App() {
 
   const handleToggleStaple = async (recipe: Recipe, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    if (!recipe.id) return;
+    if (!recipe.id || !selectedHousehold?.id) return;
     try {
-      const nextStaple = !recipe.isStaple;
-      await updateDoc(doc(db, 'recipes', recipe.id), {
-        isStaple: nextStaple,
-        updatedAt: serverTimestamp()
-      });
+      const nextStaple = await toggleRecipeStaple(recipe.id, selectedHousehold.id, !!recipe.isStaple);
+      setRecipes(prev => prev.map(r => r.id === recipe.id ? { ...r, isStaple: nextStaple } : r));
       if (viewingRecipe && viewingRecipe.id === recipe.id) {
         setViewingRecipe({ ...viewingRecipe, isStaple: nextStaple });
       }
@@ -1330,30 +1305,32 @@ export default function App() {
           skippedCount++;
           continue;
         } else if (duplicateStrategy === 'overwrite' && existing.id) {
-          const cleanedData = Object.fromEntries(
-            Object.entries(recipeData).filter(([_, v]) => v !== undefined && _ !== 'id')
+          const updated = await saveRecipe(
+            {
+              ...existing,
+              ...recipeData,
+              id: existing.id
+            },
+            user,
+            selectedHousehold.id
           );
-          await updateDoc(doc(db, 'recipes', existing.id), {
-            ...cleanedData,
-            updatedAt: serverTimestamp(),
-          });
+          setRecipes(prev => prev.map(r => r.id === updated.id ? updated : r));
           overwrittenCount++;
           continue;
         }
       }
 
       // Add as new recipe
-      const cleanedData = Object.fromEntries(
-        Object.entries(recipeData).filter(([_, v]) => v !== undefined && _ !== 'id')
+      const saved = await saveRecipe(
+        {
+          ...recipeData,
+          id: undefined,
+          isStaple: Boolean(recipeData.isStaple)
+        },
+        user,
+        selectedHousehold.id
       );
-      await addDoc(collection(db, 'recipes'), {
-        ...cleanedData,
-        authorId: user.uid,
-        householdId: selectedHousehold.id,
-        createdAt: serverTimestamp(),
-        rating: cleanedData.rating || 0,
-        isStaple: Boolean(cleanedData.isStaple),
-      });
+      setRecipes(prev => [saved, ...prev.filter(r => r.id !== saved.id)]);
       importedCount++;
     }
 

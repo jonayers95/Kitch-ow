@@ -40,6 +40,10 @@ import {
   sanitizeAndPruneMealPlanDays,
   getCachedMealPlan
 } from '../services/mealPlanService';
+import {
+  saveRecipe,
+  toggleRecipeStaple
+} from '../services/recipeService';
 import { 
   addDoc, 
   collection, 
@@ -648,13 +652,10 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     try {
       await saveMealPlanUpdate(currentDays);
 
-      // If requested, also mark as staple in Firestore
-      if (markAsStaple && !chosenRecipe.isStaple && chosenRecipe.id) {
+      // If requested, also mark as staple in cache and Firestore
+      if (markAsStaple && !chosenRecipe.isStaple && chosenRecipe.id && household?.id) {
         try {
-          await updateDoc(doc(db, 'recipes', chosenRecipe.id), {
-            isStaple: true,
-            updatedAt: serverTimestamp()
-          });
+          await toggleRecipeStaple(chosenRecipe.id, household.id, false);
         } catch (err) {
           console.error("Failed to mark recipe as staple during swap:", err);
         }
@@ -767,14 +768,15 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
   }) => {
     if (!household?.id) return;
     try {
-      await addDoc(collection(db, 'recipes'), {
-        ...recipeData,
-        authorId: currentUserId,
-        householdId: household.id,
-        createdAt: serverTimestamp(),
-        rating: 0,
-        isStaple: false,
-      });
+      await saveRecipe(
+        {
+          ...recipeData,
+          rating: 0,
+          isStaple: false
+        },
+        { uid: currentUserId },
+        household.id
+      );
       setSwapFeedbackToast(`Saved "${recipeData.title}" to your recipe book!`);
       setTimeout(() => setSwapFeedbackToast(null), 3500);
     } catch (err) {
