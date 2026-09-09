@@ -152,7 +152,7 @@ describe('WeeklyMealPlan Cross-Session Persistence & Refresh Durability', () => 
     });
 
     // Delete meal
-    const deleteBtn = screen.getByTitle(/Remove from meal plan/i);
+    const deleteBtn = screen.getByRole('button', { name: /Delete meal from plan/i });
     fireEvent.click(deleteBtn);
 
     // Meal is gone

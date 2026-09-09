@@ -144,7 +144,7 @@ describe('Meal Plan Persistence & 30-Day Retention Service', () => {
   });
 
   describe('saveMealPlan & subscribeToWeeklyMealPlan', () => {
-    it('saveMealPlan writes to localStorage cache and commits to Firestore with merge', async () => {
+    it('saveMealPlan writes to localStorage cache and commits full document to Firestore without merge', async () => {
       const days = {
         '2026-09-08': [
           { id: 'slot_pasta', mealType: 'Dinner' as const, recipeId: 'rec_pasta', isDone: false }
@@ -165,7 +165,7 @@ describe('Meal Plan Persistence & 30-Day Retention Service', () => {
       expect(setDocArgs[1].householdId).toBe('hh_test');
       expect(setDocArgs[1].weekStartDate).toBe('2026-09-07');
       expect(setDocArgs[1].days['2026-09-08'][0].recipeId).toBe('rec_pasta');
-      expect(setDocArgs[2]).toEqual({ merge: true });
+      expect(setDocArgs[2]).toBeUndefined();
     });
 
     it('subscribeToWeeklyMealPlan immediately hydrates from cache before Firestore snapshot', () => {

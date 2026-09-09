@@ -94,7 +94,7 @@ interface WeeklyMealPlanProps {
   household: Household | null;
   recipes: Recipe[];
   currentUserId: string;
-  onViewRecipe: (recipe: Recipe) => void;
+  onViewRecipe: (recipe: Recipe, mealSlotContext?: { dateKey: string; slotId: string }) => void;
   onRequestAddRecipe: () => void;
 }
 
@@ -606,6 +606,8 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     }
 
     await saveMealPlanUpdate(currentDays);
+    setSwapFeedbackToast("Meal removed from meal plan.");
+    setTimeout(() => setSwapFeedbackToast(null), 3000);
   };
 
   const handleClearDay = async (dateKey: string) => {
@@ -613,6 +615,8 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
     const currentDays = { ...(mealPlan.days || {}) };
     delete currentDays[dateKey];
     await saveMealPlanUpdate(currentDays);
+    setSwapFeedbackToast("Day cleared.");
+    setTimeout(() => setSwapFeedbackToast(null), 3000);
   };
 
   // Household Staples & Quick Recipes
@@ -1523,8 +1527,14 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                               {slot.isDone ? <CheckSquare className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
                             </button>
                             <button
-                              onClick={() => handleDeleteSlot(day.dateKey, slot.id)}
-                              title="Remove from meal plan"
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteSlot(day.dateKey, slot.id);
+                              }}
+                              title="Delete meal from plan"
+                              aria-label="Delete meal from plan"
+                              data-testid="delete-meal-slot-button"
                               className="p-1 opacity-70 sm:opacity-0 sm:group-hover/slot:opacity-100 text-stone-400 hover:text-red-500 transition-opacity"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -1561,7 +1571,7 @@ export const WeeklyMealPlan: React.FC<WeeklyMealPlanProps> = ({
                           </div>
                         ) : matchedRecipe ? (
                           <div 
-                            onClick={() => onViewRecipe(matchedRecipe)}
+                            onClick={() => onViewRecipe(matchedRecipe, { dateKey: day.dateKey, slotId: slot.id })}
                             className="cursor-pointer space-y-1.5"
                           >
                             <div className="flex gap-2 items-start">

@@ -403,6 +403,7 @@ export default function App() {
   const [kitchenProfileInitialTab, setKitchenProfileInitialTab] = useState<'dietary' | 'appliances' | 'dislikes' | 'servings'>('dietary');
   const [editingRecipe, setEditingRecipe] = useState<Recipe | null>(null);
   const [viewingRecipe, setViewingRecipe] = useState<Recipe | null>(null);
+  const [viewingRecipeMealSlot, setViewingRecipeMealSlot] = useState<{ dateKey: string; slotId: string } | null>(null);
 
   const openKitchenProfile = (tab: 'dietary' | 'appliances' | 'dislikes' | 'servings' = 'dietary') => {
     setKitchenProfileInitialTab(tab);
@@ -698,13 +699,12 @@ export default function App() {
       });
       currentDays[dateStr] = daySlots;
 
-      await setDoc(planRef, {
-        householdId: selectedHousehold.id,
-        weekStartDate: targetWeekStartDateKey,
-        days: currentDays,
-        authorId: user.uid,
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
+      await saveMealPlan(
+        selectedHousehold.id,
+        targetWeekStartDateKey,
+        currentDays,
+        user.uid
+      );
 
       setPlanSuccessToast(`Scheduled "${title}" on your meal plan for ${dateStr}!`);
       setTimeout(() => setPlanSuccessToast(null), 3500);
@@ -750,13 +750,12 @@ export default function App() {
       });
       currentDays[dateStr] = daySlots;
 
-      await setDoc(planRef, {
-        householdId: selectedHousehold.id,
-        weekStartDate: targetWeekStartDateKey,
-        days: currentDays,
-        authorId: user.uid,
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
+      await saveMealPlan(
+        selectedHousehold.id,
+        targetWeekStartDateKey,
+        currentDays,
+        user.uid
+      );
 
       setPlanSuccessToast(`Added "${recipe.title}" to meal plan for ${dateStr}!`);
       setTimeout(() => setPlanSuccessToast(null), 3500);
@@ -1020,12 +1019,95 @@ export default function App() {
     }
   };
 
+  const handleRemoveViewingMealFromPlan = async () => {
+    if (!selectedHousehold?.id || !viewingRecipeMealSlot || !user) return;
+    try {
+      const { dateKey, slotId } = viewingRecipeMealSlot;
+      const [year, month, day] = dateKey.split('-').map(Number);
+      const targetDate = new Date(year, month - 1, day);
+      const dayOfWeek = targetDate.getDay();
+      const diffToMonday = (dayOfWeek + 6) % 7;
+      const monday = new Date(targetDate);
+      monday.setDate(targetDate.getDate() - diffToMonday);
+      const mYear = monday.getFullYear();
+      const mMonth = String(monday.getMonth() + 1).padStart(2, '0');
+      const mDay = String(monday.getDate()).padStart(2, '0');
+      const weekStartDateKey = `${mYear}-${mMonth}-${mDay}`;
+
+      const planDocId = `${selectedHousehold.id}_${weekStartDateKey}`;
+      const planRef = doc(db, 'mealPlans', planDocId);
+      const planSnap = await getDoc(planRef);
+      let currentDays: { [dateStr: string]: MealSlot[] } = {};
+      if (planSnap.exists()) {
+        currentDays = { ...(planSnap.data().days || {}) };
+      } else {
+        const cached = getCachedMealPlan(selectedHousehold.id, weekStartDateKey);
+        currentDays = { ...(cached?.days || {}) };
+      }
+
+      if (currentDays[dateKey]) {
+        currentDays[dateKey] = currentDays[dateKey].filter(s => s.id !== slotId);
+        if (currentDays[dateKey].length === 0) {
+          delete currentDays[dateKey];
+        }
+        await saveMealPlan(selectedHousehold.id, weekStartDateKey, currentDays, user.uid);
+      }
+
+      setViewingRecipe(null);
+      setViewingRecipeMealSlot(null);
+      setPlanSuccessToast("Meal removed from meal plan.");
+      setTimeout(() => setPlanSuccessToast(null), 3000);
+    } catch (err) {
+      console.error("Failed to remove meal from plan:", err);
+    }
+  };
+
   const handleDeleteRecipe = async (id: string) => {
     if (!selectedHousehold?.id) return;
     try {
       await deleteRecipe(id, selectedHousehold.id);
       setRecipes(prev => prev.filter(r => r.id !== id));
+
+      if (user && viewingRecipeMealSlot) {
+        const { dateKey, slotId } = viewingRecipeMealSlot;
+        const [year, month, day] = dateKey.split('-').map(Number);
+        const targetDate = new Date(year, month - 1, day);
+        const dayOfWeek = targetDate.getDay();
+        const diffToMonday = (dayOfWeek + 6) % 7;
+        const monday = new Date(targetDate);
+        monday.setDate(targetDate.getDate() - diffToMonday);
+        const mYear = monday.getFullYear();
+        const mMonth = String(monday.getMonth() + 1).padStart(2, '0');
+        const mDay = String(monday.getDate()).padStart(2, '0');
+        const weekStartDateKey = `${mYear}-${mMonth}-${mDay}`;
+
+        const planDocId = `${selectedHousehold.id}_${weekStartDateKey}`;
+        const planRef = doc(db, 'mealPlans', planDocId);
+        const planSnap = await getDoc(planRef);
+        let currentDays: { [dateStr: string]: MealSlot[] } = {};
+        if (planSnap.exists()) {
+          currentDays = { ...(planSnap.data().days || {}) };
+        } else {
+          const cached = getCachedMealPlan(selectedHousehold.id, weekStartDateKey);
+          currentDays = { ...(cached?.days || {}) };
+        }
+
+        let modified = false;
+        for (const dKey of Object.keys(currentDays)) {
+          const origLen = currentDays[dKey].length;
+          currentDays[dKey] = currentDays[dKey].filter(s => s.recipeId !== id && s.id !== slotId);
+          if (currentDays[dKey].length !== origLen) modified = true;
+          if (currentDays[dKey].length === 0) {
+            delete currentDays[dKey];
+          }
+        }
+        if (modified) {
+          await saveMealPlan(selectedHousehold.id, weekStartDateKey, currentDays, user.uid);
+        }
+      }
+
       setViewingRecipe(null);
+      setViewingRecipeMealSlot(null);
       setIsDeleteConfirmOpen(false);
       setPlanSuccessToast("Recipe deleted.");
       setTimeout(() => setPlanSuccessToast(null), 3000);
@@ -1243,13 +1325,12 @@ export default function App() {
       });
       currentDays[targetPlanDate] = daySlots;
 
-      await setDoc(planRef, {
-        householdId: selectedHousehold.id,
-        weekStartDate: weekStartDateKey,
-        days: currentDays,
-        authorId: user.uid,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
+      await saveMealPlan(
+        selectedHousehold.id,
+        weekStartDateKey,
+        currentDays,
+        user.uid
+      );
     } catch (err) {
       console.error("Failed to add recipe to meal plan:", err);
       alert("Failed to add to meal plan. Please try again.");
@@ -1612,7 +1693,10 @@ export default function App() {
             household={selectedHousehold}
             recipes={recipes}
             currentUserId={user.uid}
-            onViewRecipe={(recipe) => setViewingRecipe(recipe)}
+            onViewRecipe={(recipe, slotContext) => {
+              setViewingRecipe(recipe);
+              setViewingRecipeMealSlot(slotContext || null);
+            }}
             onRequestAddRecipe={() => {
               setEditingRecipe(null);
               setIsAddModalOpen(true);
@@ -1928,7 +2012,11 @@ export default function App() {
       {/* View Recipe Modal */}
       <Modal 
         isOpen={!!viewingRecipe} 
-        onClose={() => { setViewingRecipe(null); setIsDeleteConfirmOpen(false); }} 
+        onClose={() => {
+          setViewingRecipe(null);
+          setViewingRecipeMealSlot(null);
+          setIsDeleteConfirmOpen(false);
+        }} 
         title={viewingRecipe?.title}
       >
         <div className="space-y-8">
@@ -1982,7 +2070,33 @@ export default function App() {
           </div>
 
           <div className="pt-8 border-t border-stone-200 dark:border-stone-800 flex flex-wrap gap-2 justify-between items-center">
-            {isDeleteConfirmOpen ? (
+            {viewingRecipeMealSlot ? (
+              <div className="flex items-center gap-2">
+                <Button 
+                  variant="danger" 
+                  onClick={handleRemoveViewingMealFromPlan}
+                  aria-label="Remove meal from meal plan"
+                  title="Remove meal from meal plan"
+                >
+                  <Trash2 className="w-4 h-4" /> Remove from Meal Plan
+                </Button>
+                {isDeleteConfirmOpen ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-red-600">Delete recipe book item?</span>
+                    <Button variant="danger" onClick={() => viewingRecipe && handleDeleteRecipe(viewingRecipe.id!)}>
+                      Yes, Delete Recipe
+                    </Button>
+                    <Button variant="ghost" onClick={() => setIsDeleteConfirmOpen(false)}>
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <Button variant="ghost" onClick={() => setIsDeleteConfirmOpen(true)} className="text-xs text-stone-400 hover:text-red-500">
+                    Delete Recipe
+                  </Button>
+                )}
+              </div>
+            ) : isDeleteConfirmOpen ? (
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-red-600">Are you sure?</span>
                 <Button variant="danger" onClick={() => viewingRecipe && handleDeleteRecipe(viewingRecipe.id!)}>

@@ -326,7 +326,8 @@ export const BumpMissedMealsModal: React.FC<BumpMissedMealsModalProps> = ({
                     <button
                       type="button"
                       onClick={() => onDeleteSlot(meal.dateKey, meal.slot.id)}
-                      title="Remove missed meal"
+                      title="Delete meal from plan"
+                      aria-label="Delete missed meal from plan"
                       className="p-1.5 rounded-xl border border-stone-200 dark:border-stone-700 hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 text-stone-400 transition-colors"
                     >
                       <Trash2 className="w-3.5 h-3.5" />

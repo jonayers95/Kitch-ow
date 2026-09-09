@@ -193,7 +193,7 @@ export async function saveMealPlan(
   // 1. Immediately write to localStorage so refresh never loses data
   setCachedMealPlan(householdId, weekStartDateKey, updatedPlan, referenceDate);
 
-  // 2. Commit to Firestore with merge: true
+  // 2. Commit to Firestore (full document save so deleted slots/days are properly removed)
   const planRef = doc(db, 'mealPlans', planDocId);
   await setDoc(planRef, {
     householdId,
@@ -201,7 +201,7 @@ export async function saveMealPlan(
     days: sanitizedDays,
     authorId,
     updatedAt: serverTimestamp()
-  }, { merge: true });
+  });
 
   return updatedPlan;
 }
