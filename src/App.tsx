@@ -328,6 +328,44 @@ const Modal = ({ isOpen, onClose, title, children }: any) => {
   );
 };
 
+function formatImportError(error: unknown): string {
+  if (!error) return "Failed to import recipe. Please check the URL and try again.";
+  if (typeof error === "string") {
+    const trimmed = error.trim();
+    if (trimmed && trimmed !== "[object Object]") return trimmed;
+  }
+  if (error instanceof Error) {
+    const msg = error.message?.trim();
+    if (msg && msg !== "[object Object]") {
+      if (msg.startsWith("{") && msg.endsWith("}")) {
+        try {
+          const parsed = JSON.parse(msg);
+          const inner = parsed?.error?.message || parsed?.error || parsed?.message;
+          if (typeof inner === "string" && inner.trim() && inner !== "[object Object]") {
+            return inner.trim();
+          }
+        } catch {
+          // ignore
+        }
+      }
+      return msg;
+    }
+  }
+  if (typeof error === "object" && error !== null) {
+    const errObj = error as Record<string, any>;
+    if (typeof errObj.message === "string" && errObj.message.trim() && errObj.message !== "[object Object]") {
+      return errObj.message.trim();
+    }
+    if (typeof errObj.error === "string" && errObj.error.trim() && errObj.error !== "[object Object]") {
+      return errObj.error.trim();
+    }
+    if (typeof errObj.error?.message === "string" && errObj.error.message.trim() && errObj.error.message !== "[object Object]") {
+      return errObj.error.message.trim();
+    }
+  }
+  return "Failed to import recipe. Please check the URL and try again.";
+}
+
 // --- Main App ---
 
 export default function App() {
@@ -1158,7 +1196,7 @@ export default function App() {
       setImportUrl(''); // Clear the URL
     } catch (error) {
       console.error("Import failed:", error);
-      setImportError(error instanceof Error ? error.message : "Failed to import recipe. Please check the URL and try again.");
+      setImportError(formatImportError(error));
     } finally {
       setIsImporting(false);
     }
@@ -2275,7 +2313,7 @@ export default function App() {
             </p>
           </div>
           {importError && (
-            <div className="p-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 rounded-xl flex items-start gap-3 text-red-600 dark:text-red-400 text-sm">
+            <div role="alert" className="p-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 rounded-xl flex items-start gap-3 text-red-600 dark:text-red-400 text-sm">
               <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
               <div className="flex-1">
                 <p className="font-medium">{importError}</p>

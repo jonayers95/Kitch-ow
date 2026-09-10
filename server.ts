@@ -581,16 +581,13 @@ const aiMealPlanSchema = {
   required: ["seasonalTheme", "trendHighlights", "plan"],
 };
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export const app = express();
+app.use(express.json({ limit: "10mb" }));
 
-  app.use(express.json({ limit: "10mb" }));
-
-  // Health check
-  app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok" });
-  });
+// Health check
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
 
   // Google OAuth client ID endpoint
   app.get("/api/auth/google/client-id", (_req, res) => {
@@ -1230,25 +1227,32 @@ GUIDELINES:
   });
 
   // Vite middleware in development
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+  async function startServer() {
+    const PORT = 3000;
+
+    if (process.env.NODE_ENV !== "production") {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), "dist");
+      app.use(express.static(distPath));
+      app.get("*", (_req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://0.0.0.0:${PORT}`);
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
-  });
-}
+  if (!process.env.VERCEL) {
+    startServer().catch((err) => {
+      console.error("Failed to start server:", err);
+    });
+  }
 
-startServer().catch((err) => {
-  console.error("Failed to start server:", err);
-});
+export default app;

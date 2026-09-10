@@ -13,6 +13,57 @@ export interface ExtractedRecipe {
   description?: string;
 }
 
+// Helper to safely extract a human-readable message from API responses or serverless platform errors
+export function parseApiErrorMessage(data: any, status?: number, defaultErrorMessage = "Failed to process request."): string {
+  if (status === 404) {
+    if (typeof data?.error?.message === "string" && data.error.message.trim() && data.error.message !== "[object Object]") {
+      return `${data.error.message} (404). Please ensure backend API routes are configured.`;
+    }
+    return "The recipe extraction service endpoint was not found (404). Please ensure backend API routes are deployed or add the recipe manually.";
+  }
+  if (status === 429) {
+    return "Recipe AI extraction quota is temporarily reached. Please try again shortly or add the recipe manually.";
+  }
+  if (status === 502 || status === 504) {
+    return "The service timed out while assembling recipe details. Please check your connection and retry.";
+  }
+
+  if (typeof data === "string") {
+    const trimmed = data.trim();
+    if (trimmed && trimmed !== "[object Object]") return trimmed;
+  }
+
+  if (data && typeof data === "object") {
+    // 1. data.error as string
+    if (typeof data.error === "string") {
+      const trimmed = data.error.trim();
+      if (trimmed && trimmed !== "[object Object]") return trimmed;
+    }
+    // 2. data.error.message as string (e.g. Vercel: { error: { code: '404', message: '...' } })
+    if (typeof data.error?.message === "string") {
+      const trimmed = data.error.message.trim();
+      if (trimmed && trimmed !== "[object Object]") return trimmed;
+    }
+    // 3. data.error.details as string
+    if (typeof data.error?.details === "string") {
+      const trimmed = data.error.details.trim();
+      if (trimmed && trimmed !== "[object Object]") return trimmed;
+    }
+    // 4. data.message as string
+    if (typeof data.message === "string") {
+      const trimmed = data.message.trim();
+      if (trimmed && trimmed !== "[object Object]") return trimmed;
+    }
+    // 5. data.detail as string
+    if (typeof data.detail === "string") {
+      const trimmed = data.detail.trim();
+      if (trimmed && trimmed !== "[object Object]") return trimmed;
+    }
+  }
+
+  return defaultErrorMessage;
+}
+
 // Helper to safely perform fetch requests and handle non-JSON / HTML responses gracefully
 async function safeFetchJson<T>(url: string, bodyData: any, defaultErrorMessage: string): Promise<T> {
   let response: Response;
@@ -34,11 +85,13 @@ async function safeFetchJson<T>(url: string, bodyData: any, defaultErrorMessage:
   if (!contentType.includes("application/json")) {
     const rawText = await response.text().catch(() => "");
     console.warn(`[API] Received non-JSON response from ${url} (status ${response.status}):`, rawText.slice(0, 200));
-    throw new Error(
-      response.status === 504 || response.status === 502
-        ? "The AI planning service timed out while assembling the plan. Please retry."
-        : defaultErrorMessage
-    );
+    if (response.status === 404) {
+      throw new Error("The recipe extraction service endpoint was not found (404). Please ensure backend API routes are deployed or add the recipe manually.");
+    }
+    if (response.status === 504 || response.status === 502) {
+      throw new Error("The AI planning service timed out while assembling the plan. Please retry.");
+    }
+    throw new Error(defaultErrorMessage);
   }
 
   const data = await response.json().catch(() => {
@@ -46,7 +99,8 @@ async function safeFetchJson<T>(url: string, bodyData: any, defaultErrorMessage:
   });
 
   if (!response.ok) {
-    throw new Error(data?.error || defaultErrorMessage);
+    const errorMsg = parseApiErrorMessage(data, response.status, defaultErrorMessage);
+    throw new Error(errorMsg);
   }
 
   return data as T;
