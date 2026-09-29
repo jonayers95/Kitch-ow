@@ -15,50 +15,40 @@ export interface ExtractedRecipe {
 
 // Helper to safely extract a human-readable message from API responses or serverless platform errors
 export function parseApiErrorMessage(data: any, status?: number, defaultErrorMessage = "Failed to process request."): string {
-  if (status === 404) {
-    if (typeof data?.error?.message === "string" && data.error.message.trim() && data.error.message !== "[object Object]") {
-      return `${data.error.message} (404). Please ensure backend API routes are configured.`;
-    }
-    return "The recipe extraction service endpoint was not found (404). Please ensure backend API routes are deployed or add the recipe manually.";
-  }
-  if (status === 429) {
-    return "Recipe AI extraction quota is temporarily reached. Please try again shortly or add the recipe manually.";
-  }
-  if (status === 502 || status === 504) {
-    return "The service timed out while assembling recipe details. Please check your connection and retry.";
-  }
-
+  // First, extract any specific custom error message from the response payload
   if (typeof data === "string") {
     const trimmed = data.trim();
     if (trimmed && trimmed !== "[object Object]") return trimmed;
   }
 
   if (data && typeof data === "object") {
-    // 1. data.error as string
-    if (typeof data.error === "string") {
-      const trimmed = data.error.trim();
-      if (trimmed && trimmed !== "[object Object]") return trimmed;
+    const candidate =
+      (typeof data.error === "string" ? data.error : null) ||
+      (typeof data.error?.message === "string" ? data.error.message : null) ||
+      (typeof data.error?.details === "string" ? data.error.details : null) ||
+      (typeof data.message === "string" ? data.message : null) ||
+      (typeof data.detail === "string" ? data.detail : null);
+
+    if (candidate) {
+      const trimmed = candidate.trim();
+      if (trimmed && trimmed !== "[object Object]" && trimmed !== "An internal server error occurred.") {
+        return trimmed;
+      }
     }
-    // 2. data.error.message as string (e.g. Vercel: { error: { code: '404', message: '...' } })
-    if (typeof data.error?.message === "string") {
-      const trimmed = data.error.message.trim();
-      if (trimmed && trimmed !== "[object Object]") return trimmed;
-    }
-    // 3. data.error.details as string
-    if (typeof data.error?.details === "string") {
-      const trimmed = data.error.details.trim();
-      if (trimmed && trimmed !== "[object Object]") return trimmed;
-    }
-    // 4. data.message as string
-    if (typeof data.message === "string") {
-      const trimmed = data.message.trim();
-      if (trimmed && trimmed !== "[object Object]") return trimmed;
-    }
-    // 5. data.detail as string
-    if (typeof data.detail === "string") {
-      const trimmed = data.detail.trim();
-      if (trimmed && trimmed !== "[object Object]") return trimmed;
-    }
+  }
+
+  // Next, map HTTP status codes to clear, actionable instructions
+  if (status === 404) {
+    return "The requested service endpoint was not found (404). Please ensure backend API routes are configured.";
+  }
+  if (status === 429) {
+    return "AI generation quota is temporarily reached. Please try again shortly or use instant chef recipes.";
+  }
+  if (status === 502 || status === 504) {
+    return "The service timed out while processing your request (504). Please check your connection and retry, or use instant chef recipes.";
+  }
+  if (status === 500) {
+    return "The service encountered a server error (500). Please retry or use instant chef remixes.";
   }
 
   return defaultErrorMessage;
@@ -341,6 +331,120 @@ export async function remixLeftovers(req: LeftoverRemixRequest): Promise<Leftove
     req,
     "Failed to generate leftover remixes. Please try again."
   );
+}
+
+export function generateClientFallbackRemixes(
+  leftoverItems: any = [],
+  customIngredients?: any
+): LeftoverRemixResponse {
+  const safeLeftoverItems = Array.isArray(leftoverItems) ? leftoverItems : [];
+  const itemNames: string[] = [];
+  for (const item of safeLeftoverItems) {
+    if (typeof item === "string" && item.trim()) {
+      itemNames.push(item.trim());
+    } else if (item && typeof item === "object") {
+      const name = item.name || item.title || item.recipeTitle || "";
+      if (typeof name === "string" && name.trim()) {
+        itemNames.push(name.trim());
+      }
+    }
+  }
+
+  const extraNames: string[] = [];
+  if (typeof customIngredients === "string" && customIngredients.trim()) {
+    extraNames.push(...customIngredients.split(",").map((s) => s.trim()).filter(Boolean));
+  } else if (Array.isArray(customIngredients)) {
+    for (const extra of customIngredients) {
+      if (typeof extra === "string" && extra.trim()) {
+        extraNames.push(extra.trim());
+      }
+    }
+  }
+
+  const allNames = [...itemNames, ...extraNames];
+  const primary = allNames[0] || "Available Leftovers";
+  const secondary = allNames[1] || "Pantry Staples";
+
+  return {
+    remixes: [
+      {
+        id: "client-remix-1",
+        title: `Crispy Skillet Remix: ${primary} Hash`,
+        remixStyle: "15-Min Sizzling Skillet",
+        description: `Breathes instant life into ${primary} by searing it in a sizzling hot skillet with aromatics, crisp golden edges, and a fried egg crown.`,
+        estimatedTime: 15,
+        category: "Dinner",
+        leftoversUtilized: allNames.slice(0, 3),
+        pantryItemsNeeded: ["Olive Oil or Butter", "2 Large Eggs", "Salt & Black Pepper", "Garlic Powder", "Hot Sauce or Salsa"],
+        ingredients: [
+          `2 cups leftover ${primary}`,
+          ...(secondary !== "Pantry Staples" ? [`1 cup ${secondary}`] : []),
+          "2 large eggs",
+          "1 tbsp butter or olive oil",
+          "1/2 tsp garlic powder & smoked paprika",
+          "Fresh herbs, hot sauce, or scallions for serving",
+        ],
+        instructions: [
+          "Heat a heavy skillet (cast iron preferred) over medium-high heat with 1 tbsp butter or cooking oil.",
+          `Add ${primary}${secondary !== "Pantry Staples" ? ` and ${secondary}` : ""}, pressing down firmly with a spatula to form a golden crispy crust for 3-4 minutes.`,
+          "Make two small wells in the center of the skillet and crack in the eggs.",
+          "Cover with a lid for 2 minutes until egg whites are set and yolks remain jammy.",
+          "Season with salt, black pepper, and smoked paprika. Drizzle with hot sauce and serve straight from the skillet.",
+        ],
+        proTips: "Don't stir constantly—letting the leftovers sit undisturbed on high heat creates caramelized, crispy golden edges!",
+      },
+      {
+        id: "client-remix-2",
+        title: `Cozy ${primary} Flatbread Melt`,
+        remixStyle: "Crispy Golden Melt",
+        description: `Layers ${primary} with melted cheese between toasted tortillas or flatbreads for an ultra-fast, comforting meal.`,
+        estimatedTime: 12,
+        category: "Lunch",
+        leftoversUtilized: allNames.slice(0, 2),
+        pantryItemsNeeded: ["Flour Tortillas or Flatbread", "Shredded Cheese", "Butter", "Sour Cream or Salsa"],
+        ingredients: [
+          `1.5 cups shredded or chopped ${primary}`,
+          "2 large flour tortillas or flatbreads",
+          "1 cup shredded cheese of choice",
+          "1 tbsp butter",
+          "Salsa, sour cream, or guacamole for dipping",
+        ],
+        instructions: [
+          "Warm a non-stick skillet over medium heat.",
+          `Place one tortilla flat, layer half the cheese, distribute ${primary} evenly, and top with remaining cheese and the second tortilla.`,
+          "Cook for 3-4 minutes until the bottom tortilla is deep golden and crisp.",
+          "Carefully flip and cook the other side for another 2-3 minutes until cheese is fully melted.",
+          "Slice into wedges and serve warm with dipping sauces.",
+        ],
+        proTips: "Cheese on both top and bottom acts as culinary glue to keep your quesadilla tightly sealed.",
+      },
+      {
+        id: "client-remix-3",
+        title: `Vibrant ${primary} Grain & Herb Power Bowl`,
+        remixStyle: "Warm Grain Bowl",
+        description: `A nourishing bowl combining warm ${primary} with crisp greens, pantry seeds, and a zesty lemon-olive oil dressing.`,
+        estimatedTime: 10,
+        category: "Lunch",
+        leftoversUtilized: allNames.slice(0, 3),
+        pantryItemsNeeded: ["Olive Oil", "Lemon Juice or Vinegar", "Dijon Mustard", "Pantry Nuts or Seeds", "Mixed Greens"],
+        ingredients: [
+          `1 to 2 cups leftover ${primary}`,
+          "2 large handfuls salad greens or shredded cabbage",
+          "2 tbsp extra virgin olive oil",
+          "1 tbsp fresh lemon juice or cider vinegar",
+          "1 tsp honey or maple syrup",
+          "2 tbsp toasted seeds or nuts",
+        ],
+        instructions: [
+          `Gently warm the ${primary} in a skillet or microwave for 60 seconds until fragrant.`,
+          "In a small bowl or jar, whisk together olive oil, lemon juice, honey, salt, and pepper.",
+          "Toss the fresh greens with half the vinaigrette in a serving bowl.",
+          `Top with the warmed ${primary}, sprinkle with toasted seeds or nuts, and drizzle remaining vinaigrette over the top.`,
+        ],
+        proTips: "Contrast in temperatures (warm protein over cool crisp greens) makes leftover bowls feel gourmet.",
+      },
+    ],
+  };
 }
 
 export async function generateRecipeImage(title: string, category?: string): Promise<string | null> {

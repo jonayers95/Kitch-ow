@@ -394,7 +394,7 @@ export default function App() {
   const [selectedHousehold, setSelectedHousehold] = useState<Household | null>(null);
   const [recipes, setRecipes] = useState<Recipe[]>(() => {
     if (typeof window !== 'undefined') {
-      const activeHId = localStorage.getItem('kitchow_active_household_id') || '';
+      const activeHId = getPersistedActiveHouseholdId() || '';
       if (activeHId) {
         return getCachedRecipes(activeHId);
       }
@@ -600,9 +600,11 @@ export default function App() {
 
   // Fetch & Subscribe to Recipes with instant local cache hydration
   useEffect(() => {
-    const householdId = selectedHousehold?.id || (typeof window !== 'undefined' ? (user ? getPersistedActiveHouseholdId(user.uid) : localStorage.getItem('kitchow_active_household_id')) : '');
+    const householdId = selectedHousehold?.id || (user ? getPersistedActiveHouseholdId(user.uid) : getPersistedActiveHouseholdId()) || '';
     if (!householdId) {
-      setRecipes([]);
+      if (!loading && !householdsLoading) {
+        setRecipes([]);
+      }
       return;
     }
 
@@ -618,7 +620,7 @@ export default function App() {
     );
 
     return () => unsubscribe();
-  }, [user, selectedHousehold?.id]);
+  }, [user, selectedHousehold?.id, loading, householdsLoading]);
 
   // Fetch past cooked meals across all meal plans for Leftover Remix Engine
   useEffect(() => {
@@ -679,7 +681,11 @@ export default function App() {
     estimatedTime: number;
     imageUrl?: string;
   }) => {
-    if (!user || !selectedHousehold) return;
+    const targetHousehold = selectedHousehold || (households.length > 0 ? households[0] : null);
+    if (!user || !targetHousehold) return;
+    if (!selectedHousehold && targetHousehold) {
+      setSelectedHousehold(targetHousehold);
+    }
     try {
       const saved = await saveRecipe(
         {
@@ -688,7 +694,7 @@ export default function App() {
           isStaple: false
         },
         user,
-        selectedHousehold.id
+        targetHousehold.id
       );
       setRecipes(prev => [saved, ...prev.filter(r => r.id !== saved.id)]);
       setPlanSuccessToast(`Saved "${recipeData.title}" to your recipe book!`);
@@ -1008,7 +1014,14 @@ export default function App() {
   };
 
   const handleSaveRecipe = async (recipeData: Partial<Recipe>) => {
-    if (!user || !selectedHousehold) return;
+    const targetHousehold = selectedHousehold || (households.length > 0 ? households[0] : null);
+    if (!user || !targetHousehold) {
+      setRecipeFormError("Please select or create a household kitchen first.");
+      return;
+    }
+    if (!selectedHousehold && targetHousehold) {
+      setSelectedHousehold(targetHousehold);
+    }
     
     // Validation
     if (!recipeData.title?.trim()) {
@@ -1031,10 +1044,10 @@ export default function App() {
         ...recipeData,
         id: editingRecipe?.id || undefined,
         authorId: editingRecipe?.authorId || user.uid,
-        householdId: selectedHousehold.id,
+        householdId: targetHousehold.id,
       };
 
-      const saved = await saveRecipe(payload, user, selectedHousehold.id);
+      const saved = await saveRecipe(payload, user, targetHousehold.id);
 
       // Optimistically update recipes state
       setRecipes(prev => {
@@ -1402,8 +1415,12 @@ export default function App() {
     duplicateStrategy: 'skip' | 'overwrite' | 'add_as_new',
     importedKitchenProfile?: HouseholdKitchenProfile
   ) => {
-    if (!user || !selectedHousehold?.id) {
+    const targetHousehold = selectedHousehold || (households.length > 0 ? households[0] : null);
+    if (!user || !targetHousehold?.id) {
       throw new Error("No active household selected");
+    }
+    if (!selectedHousehold && targetHousehold) {
+      setSelectedHousehold(targetHousehold);
     }
 
     let importedCount = 0;
@@ -1431,7 +1448,7 @@ export default function App() {
               id: existing.id
             },
             user,
-            selectedHousehold.id
+            targetHousehold.id
           );
           setRecipes(prev => prev.map(r => r.id === updated.id ? updated : r));
           overwrittenCount++;
@@ -1447,18 +1464,18 @@ export default function App() {
           isStaple: Boolean(recipeData.isStaple)
         },
         user,
-        selectedHousehold.id
+        targetHousehold.id
       );
       setRecipes(prev => [saved, ...prev.filter(r => r.id !== saved.id)]);
       importedCount++;
     }
 
     // If kitchen profile was imported and provided
-    if (importedKitchenProfile && selectedHousehold.id) {
-      await setDoc(doc(db, 'households', selectedHousehold.id), {
+    if (importedKitchenProfile && targetHousehold.id) {
+      await setDoc(doc(db, 'households', targetHousehold.id), {
         kitchenProfile: importedKitchenProfile,
       }, { merge: true });
-      setSelectedHousehold(prev => prev ? { ...prev, kitchenProfile: importedKitchenProfile } : prev);
+      setSelectedHousehold(prev => prev ? { ...prev, kitchenProfile: importedKitchenProfile } : targetHousehold);
     }
 
     setPlanSuccessToast(

@@ -9,6 +9,7 @@ import {
   updateDoc, 
   addDoc, 
   serverTimestamp, 
+  Timestamp,
   arrayUnion, 
   arrayRemove, 
   deleteField,
@@ -22,29 +23,50 @@ import { setCachedRecipes } from './recipeService';
 
 const ACTIVE_HOUSEHOLD_PREFIX = 'kitchow_active_household_';
 const CACHED_HOUSEHOLDS_PREFIX = 'kitchow_cached_households_';
+export const GENERIC_ACTIVE_HOUSEHOLD_KEY = 'kitchow_active_household_id';
 
-export function getPersistedActiveHouseholdId(userId: string): string | null {
-  if (typeof window === 'undefined' || !userId) return null;
+export function getPersistedActiveHouseholdId(userId?: string): string | null {
+  if (typeof window === 'undefined') return null;
   try {
-    return localStorage.getItem(`${ACTIVE_HOUSEHOLD_PREFIX}${userId}`);
+    if (userId) {
+      return localStorage.getItem(`${ACTIVE_HOUSEHOLD_PREFIX}${userId}`);
+    }
+    const generic = localStorage.getItem(GENERIC_ACTIVE_HOUSEHOLD_KEY);
+    if (generic) return generic;
+
+    // Scan for any household ID in localStorage as fallback when userId is not provided
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(ACTIVE_HOUSEHOLD_PREFIX)) {
+        const val = localStorage.getItem(key);
+        if (val) return val;
+      }
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
-export function setPersistedActiveHouseholdId(userId: string, householdId: string): void {
-  if (typeof window === 'undefined' || !userId || !householdId) return;
+export function setPersistedActiveHouseholdId(userId?: string, householdId?: string): void {
+  if (typeof window === 'undefined' || !householdId) return;
   try {
-    localStorage.setItem(`${ACTIVE_HOUSEHOLD_PREFIX}${userId}`, householdId);
+    if (userId) {
+      localStorage.setItem(`${ACTIVE_HOUSEHOLD_PREFIX}${userId}`, householdId);
+    }
+    localStorage.setItem(GENERIC_ACTIVE_HOUSEHOLD_KEY, householdId);
   } catch (err) {
     console.warn('Failed to persist active household ID:', err);
   }
 }
 
-export function clearPersistedActiveHouseholdId(userId: string): void {
-  if (typeof window === 'undefined' || !userId) return;
+export function clearPersistedActiveHouseholdId(userId?: string): void {
+  if (typeof window === 'undefined') return;
   try {
-    localStorage.removeItem(`${ACTIVE_HOUSEHOLD_PREFIX}${userId}`);
+    if (userId) {
+      localStorage.removeItem(`${ACTIVE_HOUSEHOLD_PREFIX}${userId}`);
+    }
+    localStorage.removeItem(GENERIC_ACTIVE_HOUSEHOLD_KEY);
   } catch {
     // Ignore
   }
@@ -130,7 +152,7 @@ export async function createHouseholdWithStarterPack(
       cachedSeedList.push({
         ...cleanedRecipe,
         id: rRef.id,
-        createdAt: { toMillis: () => Date.now() } as any
+        createdAt: Timestamp.fromMillis(Date.now())
       });
       batch.set(rRef, cleanedRecipe);
     }
@@ -254,7 +276,7 @@ export function subscribeToUserHouseholds(
       }
     });
 
-    if (hasChanges || (!ownerFetched && !memberFetched)) {
+    if (hasChanges || (ownerFetched && memberFetched)) {
       broadcast();
     }
   };
@@ -264,6 +286,8 @@ export function subscribeToUserHouseholds(
     handleDocs(snapshot.docs);
   }, (err) => {
     console.warn('Household owner query notice:', err);
+    ownerFetched = true;
+    if (memberFetched) broadcast();
     onError?.(err);
   });
 
@@ -272,6 +296,8 @@ export function subscribeToUserHouseholds(
     handleDocs(snapshot.docs);
   }, (err) => {
     console.warn('Household member query notice:', err);
+    memberFetched = true;
+    if (ownerFetched) broadcast();
     onError?.(err);
   });
 

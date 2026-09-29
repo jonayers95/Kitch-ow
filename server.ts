@@ -1,6 +1,5 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import { extractRecipeFromHtml, normalizeRecipeUrl } from "./src/utils/recipeExtractor";
@@ -26,19 +25,19 @@ async function generateContentWithFallback(
     contents: any;
     config?: any;
   },
-  models: string[] = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
+  models: string[] = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"]
 ) {
   let lastError: any = null;
 
   for (const model of models) {
-    // Try each model with a quick timeout to prevent hanging requests
+    // Try each model with a quick timeout to prevent hanging requests in serverless runtimes
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         console.log(`[Gemini] Attempting generation with model "${model}" (attempt ${attempt + 1})...`);
         
-        // Timeout promise of 12 seconds per attempt
+        // Timeout promise of 6.5 seconds per attempt
         const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Model "${model}" call timed out`)), 12000)
+          setTimeout(() => reject(new Error(`Model "${model}" call timed out`)), 6500)
         );
 
         const apiPromise = ai.models.generateContent({
@@ -446,16 +445,37 @@ function generateSmartFallbackRecipe(category: string = "Dinner", details: strin
   };
 }
 function generateSmartFallbackRemixes(
-  leftoverItems: Array<{ name: string; notes?: string }>,
-  customIngredients?: string
+  leftoverItems: any = [],
+  customIngredients?: any
 ) {
-  const allLeftoverNames = [
-    ...leftoverItems.map((item) => item.name),
-    ...(customIngredients ? customIngredients.split(",").map((s) => s.trim()).filter(Boolean) : []),
-  ];
+  try {
+    const safeLeftoverItems = Array.isArray(leftoverItems) ? leftoverItems : [];
+    const itemNames: string[] = [];
+    for (const item of safeLeftoverItems) {
+      if (typeof item === "string" && item.trim()) {
+        itemNames.push(item.trim());
+      } else if (item && typeof item === "object") {
+        const name = item.name || item.title || item.recipeTitle || "";
+        if (typeof name === "string" && name.trim()) {
+          itemNames.push(name.trim());
+        }
+      }
+    }
 
-  const primaryLeftover = allLeftoverNames[0] || "Available Leftovers";
-  const secondaryLeftover = allLeftoverNames[1] || "Pantry Staples";
+    const extraNames: string[] = [];
+    if (typeof customIngredients === "string" && customIngredients.trim()) {
+      extraNames.push(...customIngredients.split(",").map((s: string) => s.trim()).filter(Boolean));
+    } else if (Array.isArray(customIngredients)) {
+      for (const extra of customIngredients) {
+        if (typeof extra === "string" && extra.trim()) {
+          extraNames.push(extra.trim());
+        }
+      }
+    }
+
+    const allLeftoverNames = [...itemNames, ...extraNames];
+    const primaryLeftover = allLeftoverNames[0] || "Available Leftovers";
+    const secondaryLeftover = allLeftoverNames[1] || "Pantry Staples";
 
   return {
     remixes: [
@@ -537,6 +557,25 @@ function generateSmartFallbackRemixes(
       }
     ]
   };
+} catch (_e) {
+  return {
+    remixes: [
+      {
+        id: "fallback-remix-1",
+        title: "Crispy Skillet Leftover Hash",
+        remixStyle: "15-Min Sizzling Skillet",
+        description: "Sear available fridge leftovers in a hot skillet with aromatics and an egg crown.",
+        estimatedTime: 15,
+        category: "Dinner",
+        leftoversUtilized: ["Available Leftovers"],
+        pantryItemsNeeded: ["Cooking Oil", "2 Eggs", "Salt & Pepper"],
+        ingredients: ["2 cups available leftovers", "2 eggs", "1 tbsp oil", "Salt & pepper"],
+        instructions: ["Heat skillet, crisp leftovers for 4 minutes, top with eggs, cover and cook 2 minutes."],
+        proTips: "Sear hot and undisturbed for golden crispiness."
+      }
+    ]
+  };
+}
 }
 
 const aiMealPlanSchema = {
@@ -583,6 +622,17 @@ const aiMealPlanSchema = {
 
 export const app = express();
 app.use(express.json({ limit: "10mb" }));
+
+// Normalize URLs when hosted on serverless platforms (like Vercel)
+app.use((req, _res, next) => {
+  const matchedPath = (req.headers["x-matched-path"] as string) || (req.headers["x-forwarded-url"] as string);
+  if (matchedPath && matchedPath.startsWith("/api") && !req.url.startsWith("/api")) {
+    req.url = matchedPath;
+  } else if (!req.url.startsWith("/api") && (req.url.startsWith("/gemini") || req.url.startsWith("/auth") || req.url.startsWith("/feedback") || req.url.startsWith("/health"))) {
+    req.url = `/api${req.url}`;
+  }
+  next();
+});
 
 // Health check
 app.get("/api/health", (_req, res) => {
@@ -1132,7 +1182,7 @@ PLANNING INSTRUCTIONS:
 
   // Leftover Remix Engine endpoint
   app.post("/api/gemini/remix-leftovers", async (req, res) => {
-    let leftoverItems: Array<{ name: string; cookedDate?: string; notes?: string }> = [];
+    let leftoverItems: any = [];
     let customIngredients = "";
 
     try {
@@ -1140,18 +1190,32 @@ PLANNING INSTRUCTIONS:
         leftoverItems: items = [],
         customIngredients: extra = "",
         preferences = {},
-      } = req.body;
+      } = req.body || {};
 
-      leftoverItems = items;
-      customIngredients = extra;
+      const safeItems = Array.isArray(items) ? items : [];
+      const itemDescriptions: string[] = [];
+      for (const item of safeItems) {
+        if (typeof item === "string" && item.trim()) {
+          itemDescriptions.push(`- ${item.trim()}`);
+        } else if (item && typeof item === "object") {
+          const name = item.name || item.title || item.recipeTitle;
+          if (name) {
+            itemDescriptions.push(`- ${name}${item.cookedDate ? ` (Cooked ${item.cookedDate})` : ""}${item.notes ? `: ${item.notes}` : ""}`);
+          }
+        }
+      }
 
-      if ((!leftoverItems || leftoverItems.length === 0) && !customIngredients.trim()) {
+      const extraString = typeof extra === "string" ? extra.trim() : (Array.isArray(extra) ? extra.join(", ") : "");
+      leftoverItems = safeItems;
+      customIngredients = extraString;
+
+      if (itemDescriptions.length === 0 && !extraString) {
         return res.status(400).json({ error: "Please select or enter at least one leftover ingredient." });
       }
 
       const leftoversDesc = [
-        ...leftoverItems.map((item) => `- ${item.name}${item.cookedDate ? ` (Cooked ${item.cookedDate})` : ""}${item.notes ? `: ${item.notes}` : ""}`),
-        ...(customIngredients ? [`- Extra ingredients: ${customIngredients}`] : []),
+        ...itemDescriptions,
+        ...(extraString ? [`- Extra ingredients: ${extraString}`] : []),
       ].join("\n");
 
       const prompt = `You are an inventive, creative professional chef specializing in zero-food-waste kitchen remixing.
@@ -1205,8 +1269,13 @@ GUIDELINES:
     } catch (error: any) {
       console.warn("AI Leftover Remix failed or experienced high load; using smart culinary fallback:", error?.message || error);
       
-      const fallbackResult = generateSmartFallbackRemixes(leftoverItems, customIngredients);
-      return res.json(fallbackResult);
+      try {
+        const fallbackResult = generateSmartFallbackRemixes(leftoverItems, customIngredients);
+        return res.json(fallbackResult);
+      } catch (fallbackErr) {
+        console.error("Critical fallback failure in leftover remix:", fallbackErr);
+        return res.json(generateSmartFallbackRemixes([], ""));
+      }
     }
   });
 
@@ -1231,6 +1300,7 @@ GUIDELINES:
     const PORT = 3000;
 
     if (process.env.NODE_ENV !== "production") {
+      const { createServer: createViteServer } = await import("vite");
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa",

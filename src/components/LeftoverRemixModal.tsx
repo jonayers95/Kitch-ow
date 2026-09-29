@@ -4,7 +4,8 @@ import {
   remixLeftovers, 
   RemixProposal, 
   LeftoverRemixRequest,
-  generateRecipeImage 
+  generateRecipeImage,
+  generateClientFallbackRemixes 
 } from '../services/geminiService';
 import { evaluateFoodFreshness, SpoilageEvaluation } from '../utils/spoilageCalculator';
 import { 
@@ -231,6 +232,23 @@ export const LeftoverRemixModal: React.FC<LeftoverRemixModalProps> = ({
       setError(err.message || 'Failed to generate leftover remixes. Please try again.');
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  // Instant Chef Remix Fallback (no external server dependency)
+  const handleLoadInstantFallback = () => {
+    const selectedMealObjects = evaluatedPastMeals.filter((m) =>
+      selectedPastMealIds.includes(m.id)
+    );
+    const items = selectedMealObjects.map((m) => ({
+      name: m.recipeTitle,
+      cookedDate: m.cookedDate,
+    }));
+    const fallback = generateClientFallbackRemixes(items, customIngredients);
+    if (fallback && fallback.remixes && fallback.remixes.length > 0) {
+      setRemixes(fallback.remixes);
+      setExpandedRemixId(fallback.remixes[0].id);
+      setError(null);
     }
   };
 
@@ -542,14 +560,31 @@ ${remix.proTips ? `💡 CHEF PRO-TIP: ${remix.proTips}` : ''}`;
 
               {/* Error banner */}
               {error && (
-                <div className="p-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-2xl text-red-700 dark:text-red-300 text-xs flex items-center justify-between">
-                  <span>{error}</span>
-                  <button
-                    onClick={handleGenerateRemixes}
-                    className="px-3 py-1 bg-red-600 text-white rounded-lg font-bold hover:bg-red-700"
-                  >
-                    Try Again
-                  </button>
+                <div className="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-2xl text-amber-900 dark:text-amber-200 text-xs space-y-2.5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                      <span className="font-medium leading-relaxed">{error}</span>
+                    </div>
+                    <button
+                      onClick={handleGenerateRemixes}
+                      className="px-3 py-1 bg-amber-600 text-white rounded-lg font-bold hover:bg-amber-700 shrink-0 transition-all active:scale-95"
+                    >
+                      Try Again
+                    </button>
+                  </div>
+                  <div className="pt-2 border-t border-amber-200/60 dark:border-amber-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <span className="text-stone-600 dark:text-stone-400">
+                      Need quick ideas right now without waiting on AI servers?
+                    </span>
+                    <button
+                      onClick={handleLoadInstantFallback}
+                      className="px-3.5 py-1.5 bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 rounded-xl font-bold hover:opacity-90 shrink-0 transition-all active:scale-95 flex items-center justify-center gap-1.5 shadow-sm"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400 dark:text-amber-600" />
+                      <span>Instant Chef Remix</span>
+                    </button>
+                  </div>
                 </div>
               )}
 

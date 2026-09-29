@@ -13,6 +13,14 @@ vi.mock('../firebase', () => ({
 
 const mockSetDoc = vi.fn().mockImplementation(() => Promise.resolve());
 
+const now = new Date();
+const currentDay = now.getDay();
+const diffToMonday = now.getDate() - currentDay + (currentDay === 0 ? -6 : 1);
+const mondayDate = new Date(now.setDate(diffToMonday));
+const testWeekTuesday = new Date(mondayDate);
+testWeekTuesday.setDate(mondayDate.getDate() + 1);
+const testDateKey = `${testWeekTuesday.getFullYear()}-${String(testWeekTuesday.getMonth() + 1).padStart(2, '0')}-${String(testWeekTuesday.getDate()).padStart(2, '0')}`;
+
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   return {
@@ -23,14 +31,14 @@ vi.mock('firebase/firestore', async (importOriginal) => {
         exists: () => true,
         data: () => ({
           days: {
-            '2026-09-08': [
+            [testDateKey]: [
               {
                 id: 'slot_with_photo',
                 mealType: 'Dinner',
                 customTitle: 'Seared Steak with Herbs',
                 imageUrl: 'data:image/jpeg;base64,mockphoto123',
-                imageCapturedAt: '2026-09-08T10:00:00.000Z',
-                imageExpiresAt: '2026-10-08T10:00:00.000Z',
+                imageCapturedAt: `${testDateKey}T10:00:00.000Z`,
+                imageExpiresAt: '2026-12-08T10:00:00.000Z',
                 isDone: false
               }
             ]

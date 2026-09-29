@@ -15,6 +15,7 @@ import { db } from '../firebase';
 import { Recipe, Category } from '../types';
 
 export const RECIPES_CACHE_PREFIX = 'kitchow_recipes_';
+export const DELETED_RECIPES_PREFIX = 'kitchow_deleted_recipes_';
 
 /**
  * Generate cache key for a household's recipes in localStorage
@@ -24,14 +25,97 @@ export function getRecipeCacheKey(householdId: string): string {
 }
 
 /**
+ * Generate key for deleted recipe tombstones in localStorage
+ */
+export function getRecipeTombstonesKey(householdId: string): string {
+  return `${DELETED_RECIPES_PREFIX}${householdId}`;
+}
+
+/**
+ * Retrieve deleted recipe IDs (tombstones) for a household
+ */
+export function getDeletedRecipeIds(householdId: string): Set<string> {
+  if (typeof window === 'undefined' || !householdId) return new Set();
+  try {
+    const raw = localStorage.getItem(getRecipeTombstonesKey(householdId));
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Add a deleted recipe ID to the household's tombstone set
+ */
+export function addDeletedRecipeTombstone(householdId: string, recipeId: string): void {
+  if (typeof window === 'undefined' || !householdId || !recipeId) return;
+  try {
+    const current = getDeletedRecipeIds(householdId);
+    current.add(recipeId);
+    localStorage.setItem(getRecipeTombstonesKey(householdId), JSON.stringify(Array.from(current)));
+  } catch (err) {
+    console.warn('Notice adding recipe deletion tombstone:', err);
+  }
+}
+
+/**
+ * Remove a recipe ID from the tombstone set (e.g. once confirmed deleted from Firestore or re-added)
+ */
+export function removeDeletedRecipeTombstone(householdId: string, recipeId: string): void {
+  if (typeof window === 'undefined' || !householdId || !recipeId) return;
+  try {
+    const current = getDeletedRecipeIds(householdId);
+    if (current.delete(recipeId)) {
+      localStorage.setItem(getRecipeTombstonesKey(householdId), JSON.stringify(Array.from(current)));
+    }
+  } catch (err) {
+    console.warn('Notice removing recipe deletion tombstone:', err);
+  }
+}
+
+/**
+ * Safely converts any timestamp representation (Firestore Timestamp, cached object, Date, number, or millis)
+ * into a genuine Firestore Timestamp instance.
+ */
+export function toFirestoreTimestamp(val: any): Timestamp {
+  if (!val) return Timestamp.now();
+  if (val instanceof Timestamp) return val;
+  if (typeof val.toMillis === 'function') {
+    try {
+      return Timestamp.fromMillis(val.toMillis());
+    } catch {
+      // Fallback
+    }
+  }
+  if (typeof val.seconds === 'number') {
+    return new Timestamp(val.seconds, typeof val.nanoseconds === 'number' ? val.nanoseconds : 0);
+  }
+  if (typeof val === 'number') {
+    return Timestamp.fromMillis(val);
+  }
+  if (val instanceof Date) {
+    return Timestamp.fromDate(val);
+  }
+  return Timestamp.now();
+}
+
+/**
  * Strips undefined values from an object/array so Firestore setDoc does not throw
  */
 export function cleanUndefinedValues<T>(obj: T): T {
   if (obj === null || obj === undefined) return obj;
+  if (obj instanceof Timestamp || obj instanceof Date || (obj && (obj as any)._isServerTimestamp)) {
+    return obj;
+  }
   if (Array.isArray(obj)) {
     return obj.map(item => cleanUndefinedValues(item)) as unknown as T;
   }
   if (typeof obj === 'object') {
+    if (typeof (obj as any).toMillis === 'function') {
+      return obj;
+    }
     const cleaned: any = {};
     for (const [key, value] of Object.entries(obj)) {
       if (value !== undefined) {
@@ -41,6 +125,35 @@ export function cleanUndefinedValues<T>(obj: T): T {
     return cleaned as T;
   }
   return obj;
+}
+
+/**
+ * Sanitizes a Recipe object into a clean payload for Firestore setDoc / updateDoc.
+ * Ensures:
+ * - No plain function properties (e.g. toMillis) that cause Firestore serialization crashes.
+ * - Real Timestamp instances or serverTimestamp() for createdAt and updatedAt.
+ * - Undefined values stripped.
+ */
+export function cleanRecipeForFirestore(recipe: Partial<Recipe>, isNew: boolean): Record<string, any> {
+  const { id, _createdAtMillis, ...rest } = recipe as any;
+
+  let createdAt: any;
+  if (isNew) {
+    createdAt = serverTimestamp();
+  } else if (recipe.createdAt) {
+    createdAt = toFirestoreTimestamp(recipe.createdAt);
+  } else {
+    createdAt = serverTimestamp();
+  }
+
+  const payload: Record<string, any> = {
+    ...rest,
+    id: recipe.id,
+    createdAt,
+    updatedAt: serverTimestamp()
+  };
+
+  return cleanUndefinedValues(payload);
 }
 
 /**
@@ -56,15 +169,15 @@ export function getCachedRecipes(householdId: string): Recipe[] {
     return parsed.map((r: any) => {
       const millis = typeof r._createdAtMillis === 'number'
         ? r._createdAtMillis
-        : (typeof r.createdAt === 'number' ? r.createdAt : Date.now());
-      const { _createdAtMillis, ...rest } = r;
+        : (typeof r.createdAt === 'number'
+          ? r.createdAt
+          : (typeof r.createdAt?.seconds === 'number'
+            ? r.createdAt.seconds * 1000
+            : Date.now()));
+      const { _createdAtMillis, createdAt: _ignored, ...rest } = r;
       return {
         ...rest,
-        createdAt: {
-          toMillis: () => millis,
-          seconds: Math.floor(millis / 1000),
-          nanoseconds: 0
-        }
+        createdAt: Timestamp.fromMillis(millis)
       } as Recipe;
     });
   } catch (err) {
@@ -84,8 +197,9 @@ export function setCachedRecipes(householdId: string, recipes: Recipe[]): void {
         (typeof (r.createdAt as any)?.seconds === 'number' ? (r.createdAt as any).seconds * 1000 : null) ||
         (typeof r.createdAt === 'number' ? r.createdAt : null) ||
         Date.now();
+      const { createdAt, _createdAtMillis, ...rest } = r as any;
       return {
-        ...r,
+        ...rest,
         _createdAtMillis: millis
       };
     });
@@ -159,6 +273,9 @@ export async function saveRecipe(
     recipeId = newDocRef.id;
   }
 
+  // Clear any tombstone if re-saving / updating recipe
+  removeDeletedRecipeTombstone(householdId, recipeId!);
+
   // Title length ceiling to comply with Firestore security rules (< 200 chars)
   const safeTitle = trimmedTitle.length > 195 ? trimmedTitle.substring(0, 195) : trimmedTitle;
 
@@ -176,7 +293,7 @@ export async function saveRecipe(
     isStaple: Boolean(recipeData.isStaple),
     authorId: recipeData.authorId || user.uid,
     householdId: householdId,
-    createdAt: recipeData.createdAt || Timestamp.now()
+    createdAt: recipeData.createdAt ? toFirestoreTimestamp(recipeData.createdAt) : Timestamp.now()
   };
 
   // 1. Optimistic Local Persistence
@@ -193,14 +310,10 @@ export async function saveRecipe(
 
   setCachedRecipes(householdId, updatedList);
 
-  // 2. Sync to Firestore with timeout fallback
+  // 2. Sync to Firestore with timeout fallback and sanitized payload
   try {
     const docRef = doc(db, 'recipes', recipeId!);
-    const firestorePayload = cleanUndefinedValues({
-      ...resolvedRecipe,
-      createdAt: isNew ? serverTimestamp() : (resolvedRecipe.createdAt || serverTimestamp()),
-      updatedAt: serverTimestamp()
-    });
+    const firestorePayload = cleanRecipeForFirestore(resolvedRecipe, isNew);
 
     const writePromise = setDoc(docRef, firestorePayload, { merge: true });
     const timeoutPromise = new Promise((_, reject) =>
@@ -223,12 +336,15 @@ export async function saveRecipe(
 export async function deleteRecipe(recipeId: string, householdId: string): Promise<void> {
   if (!recipeId) return;
 
-  // 1. Optimistically remove from cache
+  // 1. Record deletion tombstone to prevent lagging remote snapshot from reviving deleted recipe
+  addDeletedRecipeTombstone(householdId, recipeId);
+
+  // 2. Optimistically remove from cache
   const cached = getCachedRecipes(householdId);
   const filtered = cached.filter(r => r.id !== recipeId);
   setCachedRecipes(householdId, filtered);
 
-  // 2. Delete from Firestore
+  // 3. Delete from Firestore
   try {
     const docRef = doc(db, 'recipes', recipeId);
     await deleteDoc(docRef);
@@ -321,10 +437,7 @@ export async function saveStockRecipes(
 
     newlyCreated.push(item);
 
-    const payload = cleanUndefinedValues({
-      ...item,
-      createdAt: serverTimestamp()
-    });
+    const payload = cleanRecipeForFirestore(item, true);
     batch.set(newRef, payload);
   }
 
@@ -343,7 +456,22 @@ export async function saveStockRecipes(
 }
 
 /**
- * Subscribe to household recipes with instant local cache delivery on reload
+ * Background-sync local-only recipes to Firestore so they are never lost
+ */
+export async function syncPendingRecipesToFirestore(householdId: string, pending: Recipe[]): Promise<void> {
+  for (const recipe of pending) {
+    try {
+      const docRef = doc(db, 'recipes', recipe.id);
+      const payload = cleanRecipeForFirestore(recipe, false);
+      await setDoc(docRef, payload, { merge: true });
+    } catch (err) {
+      console.warn('Background sync notice for pending recipe:', recipe.id, err);
+    }
+  }
+}
+
+/**
+ * Subscribe to household recipes with instant local cache delivery and resilient remote merging
  */
 export function subscribeToRecipes(
   householdId: string,
@@ -370,18 +498,64 @@ export function subscribeToRecipes(
   const unsubscribe = onSnapshot(
     q,
     (snapshot) => {
-      const fetched: Recipe[] = snapshot.docs.map(d => ({
-        id: d.id,
-        ...d.data()
-      } as Recipe));
+      const fetched: Recipe[] = snapshot.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ...data,
+          createdAt: toFirestoreTimestamp(data?.createdAt)
+        } as Recipe;
+      });
 
-      const sorted = sortRecipesNewestFirst(fetched);
+      // Retrieve current cached recipes and active deletion tombstones
+      const currentCached = getCachedRecipes(householdId);
+      const deletedIds = getDeletedRecipeIds(householdId);
 
-      // Persist latest to cache
+      const mergedMap = new Map<string, Recipe>();
+
+      // 1. Populate remote docs that are not tombstoned
+      fetched.forEach(r => {
+        if (!deletedIds.has(r.id)) {
+          mergedMap.set(r.id, r);
+        } else {
+          // If Firestore still returns a tombstoned doc, delete it in background
+          try {
+            deleteDoc(doc(db, 'recipes', r.id)).catch(() => {});
+          } catch {
+            // Non-blocking
+          }
+        }
+      });
+
+      // Clean up tombstones that are no longer in remote Firestore docs
+      const remoteIds = new Set(fetched.map(r => r.id));
+      deletedIds.forEach(id => {
+        if (!remoteIds.has(id)) {
+          removeDeletedRecipeTombstone(householdId, id);
+        }
+      });
+
+      // 2. Preserve any local recipes that were added locally but not yet in remote snapshot
+      const pendingSyncList: Recipe[] = [];
+      currentCached.forEach(cachedRecipe => {
+        if (!deletedIds.has(cachedRecipe.id) && !mergedMap.has(cachedRecipe.id)) {
+          mergedMap.set(cachedRecipe.id, cachedRecipe);
+          pendingSyncList.push(cachedRecipe);
+        }
+      });
+
+      const sorted = sortRecipesNewestFirst(Array.from(mergedMap.values()));
+
+      // Persist merged latest to cache
       setCachedRecipes(householdId, sorted);
 
       // Broadcast to subscriber
       onUpdate(sorted);
+
+      // Background-sync any pending recipes to Firestore
+      if (pendingSyncList.length > 0) {
+        syncPendingRecipesToFirestore(householdId, pendingSyncList);
+      }
     },
     (err) => {
       console.warn('Recipe listener notice:', err);
@@ -396,3 +570,4 @@ export function subscribeToRecipes(
 
   return unsubscribe;
 }
+
